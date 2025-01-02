@@ -1,0 +1,25 @@
+{% extends "layout_no_sidebar.html" %}
+
+{% block content %}
+<div class="text-center">
+    <h2>Toto Combinations Analyzer</h2>
+    <div class="row mt-4">
+        <div class="col-md-6 offset-md-3">
+            <div class="card">
+                <div class="card-header">
+                    <h5>Select Game</h5>
+                </div>
+                <div class="card-body">
+                    <div class="list-group">
+                        {% for game_type, config in games.items() %}
+                        <a href="{{ url_for('select_game', game_type=game_type) }}" class="list-group-item list-group-item-action">
+                            {{ config.name }}
+                        </a>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock content %}

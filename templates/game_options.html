@@ -1,0 +1,31 @@
+{% extends "layout_no_sidebar.html" %}
+
+{% block content %}
+<div class="text-center">
+    <h2>{{ game_config.name }} Options</h2>
+    <div class="row mt-4 justify-content-center">
+        <div class="col-md-5">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5>View/Edit Combinations</h5>
+                </div>
+                <div class="card-body">
+                    <p>Browse, edit, and manage existing combinations for {{ game_config.name }}.</p>
+                    <a href="{{ url_for('combos') }}" class="btn btn-primary">View Combos</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-5">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5>Run Analysis</h5>
+                </div>
+                <div class="card-body">
+                    <p>Perform advanced analysis on combinations for {{ game_config.name }}.</p>
+                    <a href="{{ url_for('analysis_start') }}" class="btn btn-success">Start Analysis</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock content %}

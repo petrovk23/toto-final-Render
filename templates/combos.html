@@ -1,0 +1,253 @@
+{% extends "layout.html" %}
+
+{% block sidebar %}
+<h5 class="mt-3">Combos Navigation</h5>
+<div class="mb-2 d-flex justify-content-between">
+    <button onclick="goTop()" class="btn btn-secondary">Top</button>
+    <button class="btn btn-secondary" onclick="pageUp()">Page Up</button>
+</div>
+<div class="mb-2 d-flex justify-content-between">
+    <button class="btn btn-secondary" onclick="bottom()">Bottom</button>
+    <button class="btn btn-secondary" onclick="pageDown()">Page Down</button>
+</div>
+
+<form method="get" action="{{ url_for('combos') }}" class="mb-2">
+    <div class="mb-2">
+        <label>Page Size:</label>
+        <input type="number" name="limit" value="{{ limit|default(20) }}" class="form-control">
+    </div>
+    <div class="mb-2">
+        <label>Current Offset:</label>
+        <input type="number" name="offset" value="{{ offset }}" class="form-control">
+    </div>
+    <button type="submit" class="btn btn-primary">Go</button>
+</form>
+
+<hr>
+
+<a href="{{ url_for('download_all_combos') }}" class="btn btn-info mb-2">Download All as CSV</a>
+
+{% endblock sidebar %}
+
+{% block content %}
+<h2>Existing Combos</h2>
+<p>Total Count: <span id="total-count">{{ total_count }}</span></p>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/handsontable@11.1.0/dist/handsontable.full.min.css">
+<script src="https://cdn.jsdelivr.net/npm/handsontable@11.1.0/dist/handsontable.full.min.js"></script>
+
+<div id="hot" style="width:100%; height:600px; overflow:auto;"></div>
+
+<script>
+let total_count = {{ total_count }};
+let limit = parseInt('{{ limit|default(20) }}', 10);
+let offset = parseInt('{{ offset }}', 10);
+
+function updateTotalCount(delta) {
+    total_count += delta;
+    document.getElementById('total-count').textContent = total_count;
+}
+
+function navigate(o) {
+    window.location.href = '{{ url_for("combos") }}?limit=' + limit + '&offset=' + o;
+}
+function goTop(){ navigate(0); }
+function pageUp() {
+    let newOffset = offset - limit;
+    if (newOffset < 0) newOffset = 0;
+    navigate(newOffset);
+}
+function bottom() {
+    let newOffset = total_count - limit;
+    if (newOffset < 0) newOffset = 0;
+    navigate(newOffset);
+}
+function pageDown() {
+    let newOffset = offset + limit;
+    navigate(newOffset);
+}
+
+const container = document.getElementById('hot');
+let hot;
+let loading = false;
+
+function loadData() {
+  loading = true;
+  fetch('/combos_data?limit=' + limit + '&offset=' + offset)
+    .then(response => response.json())
+    .then(data => {
+      hot.loadData(data);
+      loading = false;
+    });
+}
+
+hot = new Handsontable(container, {
+  data: [],
+  colHeaders: ["Draw", "#1", "#2", "#3", "#4", "#5", "#6", "ID"],
+  columns: [
+    { data: 0, readOnly: true },
+    { data: 1, type: 'numeric' },
+    { data: 2, type: 'numeric' },
+    { data: 3, type: 'numeric' },
+    { data: 4, type: 'numeric' },
+    { data: 5, type: 'numeric' },
+    { data: 6, type: 'numeric' },
+    { data: 7, readOnly: true }  // hidden ID
+  ],
+  hiddenColumns: {
+    columns: [7],
+    indicators: false
+  },
+  rowHeaders: true,
+  manualRowMove: true,
+  copyPaste: true,
+  contextMenu: {
+    items: {
+      "row_above": { name: "Insert row above" },
+      "row_below": { name: "Insert row below" },
+      "remove_row": { name: "Remove row" },
+      "copy": { name: "Copy" },
+      "paste": {
+        name: "Paste",
+        callback: async function() {
+          try {
+            const text = await navigator.clipboard.readText();
+            if (!text) return;
+            const cpPlugin = this.getPlugin('CopyPaste');
+            cpPlugin.paste(text);
+          } catch (err) {
+            console.error("Error reading clipboard:", err);
+            alert("Unable to paste. Your browser may require HTTPS or permission for clipboard access.");
+          }
+        }
+      }
+    }
+  },
+  licenseKey: 'non-commercial-and-evaluation'
+});
+
+let rowsToRemoveIDs = [];
+
+hot.addHook('beforeRemoveRow', (index, amount) => {
+  rowsToRemoveIDs = [];
+  for (let i = 0; i < amount; i++) {
+    const rowData = hot.getDataAtRow(index + i);
+    if (rowData && rowData[7] != null) {
+      rowsToRemoveIDs.push(rowData[7]);
+    }
+  }
+});
+
+hot.addHook('afterRemoveRow', (index, amount, source) => {
+  if (rowsToRemoveIDs.length > 0) {
+    const formData = new URLSearchParams();
+    rowsToRemoveIDs.forEach(id => formData.append('ids[]', id));
+
+    fetch('/delete_combos_hot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData
+    })
+    .then(r => {
+      if (!r.ok) {
+        alert("Error deleting combos");
+      } else {
+        updateTotalCount(-amount);
+        loadData();
+      }
+    });
+  } else {
+    loadData();
+  }
+});
+
+hot.addHook('afterCreateRow', (index, amount, source) => {
+  let after_id = null;
+  if (index > 0) {
+    const prevRow = hot.getDataAtRow(index - 1);
+    if (prevRow && prevRow[7] != null) {
+      after_id = prevRow[7];
+    }
+  }
+  fetch('/add_combo_hot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ after_id: after_id || '' })
+  }).then(r => {
+    if (!r.ok) {
+      alert("Invalid combo insert");
+    } else {
+      updateTotalCount(1);
+      loadData();
+    }
+  });
+});
+
+hot.addHook('afterRowMove', (movedRows, finalIndex, dropIndex, movePossible, orderChanged) => {
+  if (!orderChanged) return;
+  const allData = hot.getData();
+  const idsOrder = allData.map(r => r[7]).filter(x => x != null);
+  const formData = new URLSearchParams();
+  idsOrder.forEach(id => formData.append('new_order[]', id));
+
+  fetch('/move_row_hot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: formData
+  }).then(r => {
+    if (!r.ok) {
+      alert("Error moving row");
+    } else {
+      loadData();
+    }
+  });
+});
+
+hot.addHook('afterChange', (changes, source) => {
+  if (!changes || loading) return;
+  if (source === 'loadData') return;
+
+  const changedRows = new Set();
+  changes.forEach(([row, prop, oldVal, newVal]) => {
+    if (oldVal !== newVal) {
+      changedRows.add(row);
+    }
+  });
+  if (changedRows.size === 0) return;
+
+  let promises = [];
+  changedRows.forEach(rowIndex => {
+    const rowData = hot.getDataAtRow(rowIndex);
+    const draw_id = rowData[7];
+    if (draw_id != null) {
+      const nums = {
+        id: draw_id,
+        num1: rowData[1],
+        num2: rowData[2],
+        num3: rowData[3],
+        num4: rowData[4],
+        num5: rowData[5],
+        num6: rowData[6]
+      };
+      promises.push(
+        fetch('/update_combo_hot', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams(nums)
+        })
+        .then(resp => {
+          if (!resp.ok) alert("Invalid combo update");
+        })
+      );
+    }
+  });
+
+  Promise.all(promises).then(() => loadData());
+});
+
+loadData();
+</script>
+
+{# Removed the "Back to Options" button from here. The link is now in the top ribbon. #}
+
+{% endblock content %}

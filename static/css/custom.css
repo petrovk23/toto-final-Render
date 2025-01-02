@@ -1,0 +1,6 @@
+/* static/css/custom.css */
+table#combos-table tr.selected {
+    background-color: #ffb347 !important;
+    color: #000 !important;
+    font-weight: bold;
+}

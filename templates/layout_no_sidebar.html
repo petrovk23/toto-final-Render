@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Toto Combinations Analyzer</title>
+
+    <!-- Bootstrap CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/custom.css') }}">
+
+    <!-- JavaScript Libraries -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+
+    <style>
+        /* We remove the sidebar entirely */
+        .main-centered {
+            display: flex;
+            justify-content: center;
+        }
+        .content-wrapper {
+            max-width: 900px; /* adjustable */
+            width: 100%;
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <!-- Navbar with brand (left), game label (center), back link (right) -->
+    <nav class="navbar navbar-dark bg-dark mb-3">
+        <div class="container-fluid d-flex justify-content-between align-items-center">
+
+            <!-- Left: brand -->
+            <a class="navbar-brand" href="{{ url_for('index') }}">
+                Toto Combinations Analyzer
+            </a>
+
+            <!-- Right: back link logic -->
+            <div class="d-flex align-items-center">
+                {% if request.endpoint == 'index' %}
+                    <!-- On the index page, no back link -->
+
+                {% elif request.endpoint == 'select_game' %}
+                    <!-- On the select_game page, link back to index -->
+                    <a href="{{ url_for('index') }}" class="btn btn-outline-light">
+                        Back to Game Selection
+                    </a>
+
+                {% else %}
+                    {% if session.get('game_type') %}
+                        <a href="{{ url_for('select_game', game_type=session['game_type']) }}"
+                           class="btn btn-outline-light">
+                            Back to Options
+                        </a>
+                    {% else %}
+                        <a href="{{ url_for('index') }}" class="btn btn-outline-light">
+                            Back to Game Selection
+                        </a>
+                    {% endif %}
+                {% endif %}
+            </div>
+        </div>
+    </nav>
+
+    <!-- Single-column, centered content -->
+    <div class="container main-centered">
+        <div class="content-wrapper">
+            {% block content %}{% endblock content %}
+        </div>
+    </div>
+</body>
+</html>

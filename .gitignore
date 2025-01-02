@@ -1,0 +1,11 @@
+<<<<<<< HEAD
+"__pycache__/" 
+"*.pyc" 
+"venv/" 
+".env" 
+=======
+"__pycache__/" 
+"*.pyc" 
+"venv/" 
+".env" 
+>>>>>>> b58d70f000d81cbcb58a496d6fe325aff31775f1

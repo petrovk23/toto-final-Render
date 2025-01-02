@@ -1,0 +1,253 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<h4>Toto Combinations Analyzer</h4>
+
+{% if selected_df is none and top_df is none %}
+<div class="alert alert-info">
+    <p>Ready to run analysis. Adjust parameters and click "Run Analysis".</p>
+</div>
+{% endif %}
+
+<div id="analysis-progress-container" style="display: none;" class="mt-2">
+    <div class="d-flex align-items-center">
+        <div class="spinner-border spinner-border-sm text-primary me-2" role="status" id="analysis-spinner"></div>
+        <small id="analysis-status-text">Processing...</small>
+    </div>
+    <div class="progress mt-2" style="height: 4px;">
+        <div class="progress-bar" role="progressbar" style="width: 0%;" aria-valuemin="0" aria-valuemax="100" id="analysis-progress-bar"></div>
+    </div>
+    <small class="text-muted" id="analysis-progress-detail"></small>
+</div>
+
+<hr class="my-2">
+
+<div id="results-container">
+    {% if top_df is not none %}
+    <small class="text-muted">Completed in {{ elapsed }} seconds.</small>
+
+    <h6 class="mt-3 mb-2">Top-ranked combinations:</h6>
+    <table class="table table-sm table-striped table-hover">
+        <thead>
+            <tr>
+                <th style="width: 180px;">Combination</th>
+                <th style="width: 100px;">Avg Rank</th>
+                <th style="width: 100px;">Min Rank</th>
+                <th>Subsets <small class="text-muted">(click to expand)</small></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for idx, row in top_df.iterrows() %}
+            <tr>
+                <td>{{ row['Combination'] }}</td>
+                <td>{{ "%.2f"|format(row['Average Rank']) }}</td>
+                <td>{{ row['MinValue'] }}</td>
+                <td class="subset-cell">
+                    <span class="subset-preview">{{ row['Subsets'][:50] }}...</span>
+                    <span class="subset-full" style="display: none;">{{ row['Subsets'] }}</span>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    <a href="{{ url_for('download_top_csv') }}" class="btn btn-info btn-sm">Download Top CSV</a>
+    {% endif %}
+
+    {% if selected_df is not none %}
+    <h6 class="mt-4 mb-2">Top-ranked combinations w/o overlapping subsets:</h6>
+    <table class="table table-sm table-striped table-hover">
+        <thead>
+            <tr>
+                <th style="width: 180px;">Combination</th>
+                <th style="width: 100px;">Avg Rank</th>
+                <th style="width: 100px;">Min Rank</th>
+                <th>Subsets <small class="text-muted">(click to expand)</small></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for idx, row in selected_df.iterrows() %}
+            <tr>
+                <td>{{ row['Combination'] }}</td>
+                <td>{{ "%.2f"|format(row['Average Rank']) }}</td>
+                <td>{{ row['MinValue'] }}</td>
+                <td class="subset-cell">
+                    <span class="subset-preview">{{ row['Subsets'][:50] }}...</span>
+                    <span class="subset-full" style="display: none;">{{ row['Subsets'] }}</span>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    <a href="{{ url_for('download_selected_csv') }}" class="btn btn-info btn-sm">Download Selected CSV</a>
+    {% endif %}
+</div>
+
+<style>
+.table { margin-bottom: 0.5rem; }
+.table td, .table th { padding: 0.25rem 0.5rem; }
+.subset-cell {
+    cursor: pointer;
+    font-size: 12px;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.subset-cell:hover {
+    background-color: #f8f9fa;
+}
+.subset-cell.expanded {
+    max-width: none;
+    white-space: normal;
+    word-break: break-all;
+}
+.subset-preview, .subset-full {
+    font-family: monospace;
+}
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const runBtn = document.getElementById('run-analysis-btn');
+    const progressContainer = document.getElementById('analysis-progress-container');
+    const progressBar = document.getElementById('analysis-progress-bar');
+    const statusText = document.getElementById('analysis-status-text');
+    const progressDetail = document.getElementById('analysis-progress-detail');
+    const resultsContainer = document.getElementById('results-container');
+
+    let pollInterval = null;
+
+    function createParams() {
+        const params = new URLSearchParams();
+        // read the offset from #param-offset-last
+        const offsetEl = document.getElementById('param-offset-last');
+        let offsetVal = offsetEl ? offsetEl.value : "0";
+
+        params.append('offset_last', offsetVal);
+        params.append('j', document.getElementById('param-j').value);
+        params.append('k', document.getElementById('param-k').value);
+        params.append('m', document.getElementById('param-m').value);
+        params.append('l', document.getElementById('param-l').value);
+        params.append('n', document.getElementById('param-n').value);
+        return params;
+    }
+
+    function startAnalysis() {
+        // Hide results
+        resultsContainer.style.display = 'none';
+        progressContainer.style.display = 'block';
+        progressBar.style.width = '0%';
+        progressDetail.textContent = '';
+        statusText.textContent = 'Processing...';
+
+        fetch('/analysis_run', {
+            method: 'POST',
+            body: createParams()
+        })
+        .then(resp => {
+            if (!resp.ok) throw new Error('Failed to start analysis');
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = setInterval(checkProgress, 1000);
+        })
+        .catch(err => {
+            alert("Failed to start analysis: " + err.message);
+        });
+    }
+
+    function checkProgress() {
+        fetch('/analysis_progress')
+        .then(resp => {
+            if (!resp.ok) throw new Error('Error fetching progress');
+            return resp.json();
+        })
+        .then(data => {
+            if (!data.in_progress && data.done) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+                statusText.textContent = 'Done!';
+                progressBar.style.width = '100%';
+                progressDetail.textContent = `Elapsed time: ${data.elapsed} seconds.`;
+
+                // Refresh results
+                const url = new URL('/analysis', window.location.href);
+                const params = createParams();
+                params.forEach((value, key) => url.searchParams.set(key, value));
+                window.location.href = url.toString();
+            } else {
+                const p = data.processed;
+                const t = data.total;
+                let pct = (t > 0) ? Math.floor((p / t) * 100) : 0;
+                progressBar.style.width = pct + '%';
+            }
+        })
+        .catch(err => {
+            console.error("Progress check error:", err);
+            clearInterval(pollInterval);
+        });
+    }
+
+    document.querySelectorAll('.subset-cell').forEach(cell => {
+        cell.addEventListener('click', function() {
+            const preview = this.querySelector('.subset-preview');
+            const full = this.querySelector('.subset-full');
+            const isExpanded = this.classList.contains('expanded');
+
+            if (isExpanded) {
+                preview.style.display = '';
+                full.style.display = 'none';
+                this.classList.remove('expanded');
+            } else {
+                preview.style.display = 'none';
+                full.style.display = '';
+                this.classList.add('expanded');
+            }
+        });
+    });
+
+    if (runBtn) {
+        runBtn.addEventListener('click', startAnalysis);
+    }
+});
+</script>
+
+{% endblock content %}
+
+{% block sidebar %}
+<h5 class="mt-3">Parameters</h5>
+
+{# offset from last draws #}
+<div class="mb-2">
+    <label>Offset from last draw:</label>
+    <input id="param-offset-last" type="number" class="form-control form-control-sm"
+           value="{{ offset_last|default(0) }}">
+</div>
+
+<div class="mb-2">
+    <label>n-number subsets of {{ game_config.max_number }}:</label>
+    {# default changed to j (6) in the app #}
+    <input id="param-j" type="number" class="form-control form-control-sm" value="{{ j }}">
+</div>
+<div class="mb-2">
+    <label>k-number subsets of n:</label>
+    <input id="param-k" type="number" class="form-control form-control-sm" value="{{ k }}">
+</div>
+<div class="mb-2">
+    <label>Sorting option:</label>
+    <select id="param-m" class="form-select form-select-sm">
+        <option value="avg" {% if m=='avg' %}selected{% endif %}>avg</option>
+        <!-- <option value="r" {% if m=='r' %}selected{% endif %}>r</option> -->
+        <option value="min" {% if m=='min' or not m %}selected{% endif %}>min</option>
+    </select>
+</div>
+<div class="mb-2">
+    <label>Number of top-ranked combinations:</label>
+    <input id="param-l" type="number" class="form-control form-control-sm" value="{{ l|default(1) }}">
+</div>
+<div class="mb-2">
+    <label>Number of top-ranked combinations w/o overlapping subsets:</label>
+    <input id="param-n" type="number" class="form-control form-control-sm" value="{{ n|default(0) }}">
+</div>
+<button id="run-analysis-btn" class="btn btn-danger btn-sm">Run Analysis</button>
+{% endblock sidebar %}
