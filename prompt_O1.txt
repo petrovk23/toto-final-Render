@@ -1,0 +1,1571 @@
+<current_code>
+
+Procfile
+web: gunicorn app:app
+
+static/css/custom.css
+/* static/css/custom.css */
+table#combos-table tr.selected {
+    background-color: #ffb347 !important;
+    color: #000 !important;
+    font-weight: bold;
+}
+
+static/js/main.js
+// static/js/main.js
+// This file can remain empty now since all Handsontable logic moved into combos.html
+
+templates/game_options.html
+{% extends "layout_no_sidebar.html" %}
+
+{% block content %}
+<div class="text-center">
+    <h2>{{ game_config.name }} Options</h2>
+    <div class="row mt-4 justify-content-center">
+        <div class="col-md-5">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5>View/Edit Combinations</h5>
+                </div>
+                <div class="card-body">
+                    <p>Browse, edit, and manage existing combinations for {{ game_config.name }}.</p>
+                    <a href="{{ url_for('combos') }}" class="btn btn-primary">View Combos</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-5">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5>Run Analysis</h5>
+                </div>
+                <div class="card-body">
+                    <p>Perform advanced analysis on combinations for {{ game_config.name }}.</p>
+                    <a href="{{ url_for('analysis_start') }}" class="btn btn-success">Start Analysis</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock content %}
+
+templates/combos.html
+{% extends "layout.html" %}
+
+{% block sidebar %}
+<h5 class="mt-3">Combos Navigation</h5>
+<div class="mb-2 d-flex justify-content-between">
+    <button onclick="goTop()" class="btn btn-secondary">Top</button>
+    <button class="btn btn-secondary" onclick="pageUp()">Page Up</button>
+</div>
+<div class="mb-2 d-flex justify-content-between">
+    <button class="btn btn-secondary" onclick="bottom()">Bottom</button>
+    <button class="btn btn-secondary" onclick="pageDown()">Page Down</button>
+</div>
+
+<form method="get" action="{{ url_for('combos') }}" class="mb-2">
+    <div class="mb-2">
+        <label>Page Size:</label>
+        <input type="number" name="limit" value="{{ limit|default(20) }}" class="form-control">
+    </div>
+    <div class="mb-2">
+        <label>Current Offset:</label>
+        <input type="number" name="offset" value="{{ offset }}" class="form-control">
+    </div>
+    <button type="submit" class="btn btn-primary">Go</button>
+</form>
+
+<hr>
+
+<a href="{{ url_for('download_all_combos') }}" class="btn btn-info mb-2">Download All as CSV</a>
+
+{% endblock sidebar %}
+
+{% block content %}
+<h2>Existing Combos</h2>
+<p>Total Count: <span id="total-count">{{ total_count }}</span></p>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/handsontable@11.1.0/dist/handsontable.full.min.css">
+<script src="https://cdn.jsdelivr.net/npm/handsontable@11.1.0/dist/handsontable.full.min.js"></script>
+
+<div id="hot" style="width:100%; height:600px; overflow:auto;"></div>
+
+<script>
+let total_count = {{ total_count }};
+let limit = parseInt('{{ limit|default(20) }}', 10);
+let offset = parseInt('{{ offset }}', 10);
+
+function updateTotalCount(delta) {
+    total_count += delta;
+    document.getElementById('total-count').textContent = total_count;
+}
+
+function navigate(o) {
+    window.location.href = '{{ url_for("combos") }}?limit=' + limit + '&offset=' + o;
+}
+function goTop(){ navigate(0); }
+function pageUp() {
+    let newOffset = offset - limit;
+    if (newOffset < 0) newOffset = 0;
+    navigate(newOffset);
+}
+function bottom() {
+    let newOffset = total_count - limit;
+    if (newOffset < 0) newOffset = 0;
+    navigate(newOffset);
+}
+function pageDown() {
+    let newOffset = offset + limit;
+    navigate(newOffset);
+}
+
+const container = document.getElementById('hot');
+let hot;
+let loading = false;
+
+function loadData() {
+  loading = true;
+  fetch('/combos_data?limit=' + limit + '&offset=' + offset)
+    .then(response => response.json())
+    .then(data => {
+      hot.loadData(data);
+      loading = false;
+    });
+}
+
+hot = new Handsontable(container, {
+  data: [],
+  colHeaders: ["Draw", "#1", "#2", "#3", "#4", "#5", "#6", "ID"],
+  columns: [
+    { data: 0, readOnly: true },
+    { data: 1, type: 'numeric' },
+    { data: 2, type: 'numeric' },
+    { data: 3, type: 'numeric' },
+    { data: 4, type: 'numeric' },
+    { data: 5, type: 'numeric' },
+    { data: 6, type: 'numeric' },
+    { data: 7, readOnly: true }  // hidden ID
+  ],
+  hiddenColumns: {
+    columns: [7],
+    indicators: false
+  },
+  rowHeaders: true,
+  manualRowMove: true,
+  copyPaste: true,
+  contextMenu: {
+    items: {
+      "row_above": { name: "Insert row above" },
+      "row_below": { name: "Insert row below" },
+      "remove_row": { name: "Remove row" },
+      "copy": { name: "Copy" },
+      "paste": {
+        name: "Paste",
+        callback: async function() {
+          try {
+            const text = await navigator.clipboard.readText();
+            if (!text) return;
+            const cpPlugin = this.getPlugin('CopyPaste');
+            cpPlugin.paste(text);
+          } catch (err) {
+            console.error("Error reading clipboard:", err);
+            alert("Unable to paste. Your browser may require HTTPS or permission for clipboard access.");
+          }
+        }
+      }
+    }
+  },
+  licenseKey: 'non-commercial-and-evaluation'
+});
+
+let rowsToRemoveIDs = [];
+
+hot.addHook('beforeRemoveRow', (index, amount) => {
+  rowsToRemoveIDs = [];
+  for (let i = 0; i < amount; i++) {
+    const rowData = hot.getDataAtRow(index + i);
+    if (rowData && rowData[7] != null) {
+      rowsToRemoveIDs.push(rowData[7]);
+    }
+  }
+});
+
+hot.addHook('afterRemoveRow', (index, amount, source) => {
+  if (rowsToRemoveIDs.length > 0) {
+    const formData = new URLSearchParams();
+    rowsToRemoveIDs.forEach(id => formData.append('ids[]', id));
+
+    fetch('/delete_combos_hot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData
+    })
+    .then(r => {
+      if (!r.ok) {
+        alert("Error deleting combos");
+      } else {
+        updateTotalCount(-amount);
+        loadData();
+      }
+    });
+  } else {
+    loadData();
+  }
+});
+
+hot.addHook('afterCreateRow', (index, amount, source) => {
+  let after_id = null;
+  if (index > 0) {
+    const prevRow = hot.getDataAtRow(index - 1);
+    if (prevRow && prevRow[7] != null) {
+      after_id = prevRow[7];
+    }
+  }
+  fetch('/add_combo_hot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ after_id: after_id || '' })
+  }).then(r => {
+    if (!r.ok) {
+      alert("Invalid combo insert");
+    } else {
+      updateTotalCount(1);
+      loadData();
+    }
+  });
+});
+
+hot.addHook('afterRowMove', (movedRows, finalIndex, dropIndex, movePossible, orderChanged) => {
+  if (!orderChanged) return;
+  const allData = hot.getData();
+  const idsOrder = allData.map(r => r[7]).filter(x => x != null);
+  const formData = new URLSearchParams();
+  idsOrder.forEach(id => formData.append('new_order[]', id));
+
+  fetch('/move_row_hot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: formData
+  }).then(r => {
+    if (!r.ok) {
+      alert("Error moving row");
+    } else {
+      loadData();
+    }
+  });
+});
+
+hot.addHook('afterChange', (changes, source) => {
+  if (!changes || loading) return;
+  if (source === 'loadData') return;
+
+  const changedRows = new Set();
+  changes.forEach(([row, prop, oldVal, newVal]) => {
+    if (oldVal !== newVal) {
+      changedRows.add(row);
+    }
+  });
+  if (changedRows.size === 0) return;
+
+  let promises = [];
+  changedRows.forEach(rowIndex => {
+    const rowData = hot.getDataAtRow(rowIndex);
+    const draw_id = rowData[7];
+    if (draw_id != null) {
+      const nums = {
+        id: draw_id,
+        num1: rowData[1],
+        num2: rowData[2],
+        num3: rowData[3],
+        num4: rowData[4],
+        num5: rowData[5],
+        num6: rowData[6]
+      };
+      promises.push(
+        fetch('/update_combo_hot', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams(nums)
+        })
+        .then(resp => {
+          if (!resp.ok) alert("Invalid combo update");
+        })
+      );
+    }
+  });
+
+  Promise.all(promises).then(() => loadData());
+});
+
+loadData();
+</script>
+
+{# Removed the "Back to Options" button from here. The link is now in the top ribbon. #}
+
+{% endblock content %}
+
+templates/index.html
+{% extends "layout_no_sidebar.html" %}
+
+{% block content %}
+<div class="text-center">
+    <h2>Toto Combinations Analyzer</h2>
+    <div class="row mt-4">
+        <div class="col-md-6 offset-md-3">
+            <div class="card">
+                <div class="card-header">
+                    <h5>Select Game</h5>
+                </div>
+                <div class="card-body">
+                    <div class="list-group">
+                        {% for game_type, config in games.items() %}
+                        <a href="{{ url_for('select_game', game_type=game_type) }}" class="list-group-item list-group-item-action">
+                            {{ config.name }}
+                        </a>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock content %}
+
+templates/layout.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Toto Combinations Analyzer</title>
+
+    <!-- Bootstrap CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/custom.css') }}">
+
+    <!-- JavaScript Libraries -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+
+    <style>
+        .sidebar {
+            position: sticky;
+            top: 0;
+            background: #f8f9fa;
+            border-right: 1px solid #ddd;
+            padding: 1rem;
+        }
+        #combos-table thead th {
+            position: sticky;
+            top: 0;
+            background: #ffffff;
+            z-index: 10;
+        }
+        @media (min-width: 768px) {
+            .sidebar {
+                width: 250px;
+            }
+        }
+        .main-content {
+            flex-grow: 1;
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <!-- Navbar with brand (left), game label (center), back link (right) -->
+    <nav class="navbar navbar-dark bg-dark mb-3">
+        <div class="container-fluid d-flex justify-content-between align-items-center">
+
+            <!-- Left: brand -->
+            <a class="navbar-brand" href="{{ url_for('index') }}">
+                Toto Combinations Analyzer
+            </a>
+
+            <!-- Center: game label (if any) -->
+            <div class="text-light text-center flex-fill">
+                {% if session.get('game_type') %}
+                    <span style="font-weight: 500;">
+                        {{ config.GAMES[session.get('game_type')]['name'] }}
+                    </span>
+                {% endif %}
+            </div>
+
+            <!-- Right: back link logic -->
+            <div class="d-flex align-items-center">
+                {% if request.endpoint == 'index' %}
+                    <!-- On the index page, no back link -->
+
+                {% elif request.endpoint == 'select_game' %}
+                    <!-- On the select_game page, link back to index -->
+                    <a href="{{ url_for('index') }}" class="btn btn-outline-light">
+                        Back to Game Selection
+                    </a>
+
+                {% else %}
+                    {% if session.get('game_type') %}
+                        <a href="{{ url_for('select_game', game_type=session['game_type']) }}"
+                           class="btn btn-outline-light">
+                            Back to Options
+                        </a>
+                    {% else %}
+                        <a href="{{ url_for('index') }}" class="btn btn-outline-light">
+                            Back to Game Selection
+                        </a>
+                    {% endif %}
+                {% endif %}
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid">
+        <div class="row">
+            <!-- Left Pane (sidebar) -->
+            <div class="col-12 col-md-3 col-lg-2 sidebar">
+                {% block sidebar %}{% endblock sidebar %}
+            </div>
+
+            <!-- Main Content -->
+            <div class="col-12 col-md-9 col-lg-10 p-4 main-content">
+                {% block content %}{% endblock content %}
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+
+templates/layout_no_sidebar.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Toto Combinations Analyzer</title>
+
+    <!-- Bootstrap CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/custom.css') }}">
+
+    <!-- JavaScript Libraries -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+
+    <style>
+        /* We remove the sidebar entirely */
+        .main-centered {
+            display: flex;
+            justify-content: center;
+        }
+        .content-wrapper {
+            max-width: 900px; /* adjustable */
+            width: 100%;
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <!-- Navbar with brand (left), game label (center), back link (right) -->
+    <nav class="navbar navbar-dark bg-dark mb-3">
+        <div class="container-fluid d-flex justify-content-between align-items-center">
+
+            <!-- Left: brand -->
+            <a class="navbar-brand" href="{{ url_for('index') }}">
+                Toto Combinations Analyzer
+            </a>
+
+            <!-- Right: back link logic -->
+            <div class="d-flex align-items-center">
+                {% if request.endpoint == 'index' %}
+                    <!-- On the index page, no back link -->
+
+                {% elif request.endpoint == 'select_game' %}
+                    <!-- On the select_game page, link back to index -->
+                    <a href="{{ url_for('index') }}" class="btn btn-outline-light">
+                        Back to Game Selection
+                    </a>
+
+                {% else %}
+                    {% if session.get('game_type') %}
+                        <a href="{{ url_for('select_game', game_type=session['game_type']) }}"
+                           class="btn btn-outline-light">
+                            Back to Options
+                        </a>
+                    {% else %}
+                        <a href="{{ url_for('index') }}" class="btn btn-outline-light">
+                            Back to Game Selection
+                        </a>
+                    {% endif %}
+                {% endif %}
+            </div>
+        </div>
+    </nav>
+
+    <!-- Single-column, centered content -->
+    <div class="container main-centered">
+        <div class="content-wrapper">
+            {% block content %}{% endblock content %}
+        </div>
+    </div>
+</body>
+</html>
+
+templates/results.html
+{% extends "layout.html" %}
+
+{% block content %}
+<h4>Toto Combinations Analyzer</h4>
+
+{% if selected_df is none and top_df is none %}
+<div class="alert alert-info">
+    <p>Ready to run analysis. Adjust parameters and click "Run Analysis".</p>
+</div>
+{% endif %}
+
+<div id="analysis-progress-container" style="display: none;" class="mt-2">
+    <div class="d-flex align-items-center">
+        <div class="spinner-border spinner-border-sm text-primary me-2" role="status" id="analysis-spinner"></div>
+        <small id="analysis-status-text">Processing...</small>
+    </div>
+    <div class="progress mt-2" style="height: 4px;">
+        <div class="progress-bar" role="progressbar" style="width: 0%;" aria-valuemin="0" aria-valuemax="100" id="analysis-progress-bar"></div>
+    </div>
+    <small class="text-muted" id="analysis-progress-detail"></small>
+</div>
+
+<hr class="my-2">
+
+<div id="results-container">
+    {% if top_df is not none %}
+    <small class="text-muted">Completed in {{ elapsed }} seconds.</small>
+
+    <h6 class="mt-3 mb-2">{% if l == -1 %}Analysis Chain Results:{% else %}Top-ranked combinations:{% endif %}</h6>
+    <table class="table table-sm table-striped table-hover">
+        <thead>
+            <tr>
+                {% if l == -1 %}
+                <th style="width: 100px;">Analysis #</th>
+                <th style="width: 100px;">Start Draw</th>
+                {% endif %}
+                <th style="width: 180px;">Combination</th>
+                <th style="width: 100px;">Avg Rank</th>
+                <th style="width: 100px;">Min Rank</th>
+                {% if l == -1 %}
+                <th style="width: 180px;">Draws Until Common Subset</th>
+                {% endif %}
+                <th>Subsets <small class="text-muted">(click to expand)</small></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for idx, row in top_df.iterrows() %}
+            <tr>
+                {% if l == -1 %}
+                <td>{{ idx + 1 }}</td>
+                <td>{{ row['Analysis Start Draw'] }}</td>
+                {% endif %}
+                <td>{{ row['Combination'] }}</td>
+                <td>{{ "%.2f"|format(row['Average Rank']) }}</td>
+                <td>{{ row['MinValue'] }}</td>
+                {% if l == -1 %}
+                <td>{{ row['Draws Until Common Subset'] }}</td>
+                {% endif %}
+                <td class="subset-cell">
+                    <span class="subset-preview">{{ row['Subsets'][:50] }}...</span>
+                    <span class="subset-full" style="display: none;">{{ row['Subsets'] }}</span>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    <a href="{{ url_for('download_top_csv') }}" class="btn btn-info btn-sm">Download Top CSV</a>
+
+    {% if selected_df is not none %}
+    <h6 class="mt-4 mb-2">Top-ranked combinations w/o overlapping subsets:</h6>
+    <table class="table table-sm table-striped table-hover">
+        <thead>
+            <tr>
+                <th style="width: 180px;">Combination</th>
+                <th style="width: 100px;">Avg Rank</th>
+                <th style="width: 100px;">Min Rank</th>
+                <th>Subsets <small class="text-muted">(click to expand)</small></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for idx, row in selected_df.iterrows() %}
+            <tr>
+                <td>{{ row['Combination'] }}</td>
+                <td>{{ "%.2f"|format(row['Average Rank']) }}</td>
+                <td>{{ row['MinValue'] }}</td>
+                <td class="subset-cell">
+                    <span class="subset-preview">{{ row['Subsets'][:50] }}...</span>
+                    <span class="subset-full" style="display: none;">{{ row['Subsets'] }}</span>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    <a href="{{ url_for('download_selected_csv') }}" class="btn btn-info btn-sm">Download Selected CSV</a>
+    {% endif %}
+    {% endif %}
+</div>
+
+<style>
+.table { margin-bottom: 0.5rem; }
+.table td, .table th { padding: 0.25rem 0.5rem; }
+.subset-cell {
+    cursor: pointer;
+    font-size: 12px;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.subset-cell:hover {
+    background-color: #f8f9fa;
+}
+.subset-cell.expanded {
+    max-width: none;
+    white-space: normal;
+    word-break: break-all;
+}
+.subset-preview, .subset-full {
+    font-family: monospace;
+}
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const runBtn = document.getElementById('run-analysis-btn');
+    const progressContainer = document.getElementById('analysis-progress-container');
+    const progressBar = document.getElementById('analysis-progress-bar');
+    const statusText = document.getElementById('analysis-status-text');
+    const progressDetail = document.getElementById('analysis-progress-detail');
+    const resultsContainer = document.getElementById('results-container');
+
+    let pollInterval = null;
+
+    function createParams() {
+        const params = new URLSearchParams();
+        const offsetEl = document.getElementById('param-offset-last');
+        let offsetVal = offsetEl ? offsetEl.value : "0";
+
+        params.append('offset_last', offsetVal);
+        params.append('j', document.getElementById('param-j').value);
+        params.append('k', document.getElementById('param-k').value);
+        params.append('m', document.getElementById('param-m').value);
+        params.append('l', document.getElementById('param-l').value);
+        params.append('n', document.getElementById('param-n').value);
+        return params;
+    }
+
+    function startAnalysis() {
+        resultsContainer.style.display = 'none';
+        progressContainer.style.display = 'block';
+        progressBar.style.width = '0%';
+        progressDetail.textContent = '';
+        statusText.textContent = 'Processing...';
+
+        fetch('/analysis_run', {
+            method: 'POST',
+            body: createParams()
+        })
+        .then(resp => {
+            if (!resp.ok) throw new Error('Failed to start analysis');
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = setInterval(checkProgress, 1000);
+        })
+        .catch(err => {
+            alert("Failed to start analysis: " + err.message);
+        });
+    }
+
+    function checkProgress() {
+        fetch('/analysis_progress')
+        .then(resp => {
+            if (!resp.ok) throw new Error('Error fetching progress');
+            return resp.json();
+        })
+        .then(data => {
+            if (!data.in_progress && data.done) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+                statusText.textContent = 'Done!';
+                progressBar.style.width = '100%';
+                progressDetail.textContent = `Elapsed time: ${data.elapsed} seconds.`;
+
+                const url = new URL('/analysis', window.location.href);
+                const params = createParams();
+                params.forEach((value, key) => url.searchParams.set(key, value));
+                window.location.href = url.toString();
+            } else {
+                const p = data.processed;
+                const t = data.total;
+                let pct = (t > 0) ? Math.floor((p / t) * 100) : 0;
+                progressBar.style.width = pct + '%';
+            }
+        })
+        .catch(err => {
+            console.error("Progress check error:", err);
+            clearInterval(pollInterval);
+        });
+    }
+
+    document.querySelectorAll('.subset-cell').forEach(cell => {
+        cell.addEventListener('click', function() {
+            const preview = this.querySelector('.subset-preview');
+            const full = this.querySelector('.subset-full');
+            const isExpanded = this.classList.contains('expanded');
+
+            if (isExpanded) {
+                preview.style.display = '';
+                full.style.display = 'none';
+                this.classList.remove('expanded');
+            } else {
+                preview.style.display = 'none';
+                full.style.display = '';
+                this.classList.add('expanded');
+            }
+        });
+    });
+
+    if (runBtn) {
+        runBtn.addEventListener('click', startAnalysis);
+    }
+});
+</script>
+
+{% endblock content %}
+
+{% block sidebar %}
+<h5 class="mt-3">Parameters</h5>
+
+<div class="mb-2">
+    <label>Offset from last draw:</label>
+    <input id="param-offset-last" type="number" class="form-control form-control-sm"
+           value="{{ offset_last|default(0) }}">
+</div>
+
+<div class="mb-2">
+    <label>n-number subsets of {{ game_config.max_number }}:</label>
+    <input id="param-j" type="number" class="form-control form-control-sm" value="{{ j }}">
+</div>
+
+<div class="mb-2">
+    <label>k-number subsets of n:</label>
+    <input id="param-k" type="number" class="form-control form-control-sm" value="{{ k }}">
+</div>
+
+<div class="mb-2">
+    <label>Sorting option:</label>
+    <select id="param-m" class="form-select form-select-sm">
+        <option value="avg" {% if m=='avg' %}selected{% endif %}>avg</option>
+        <option value="min" {% if m=='min' or not m %}selected{% endif %}>min</option>
+    </select>
+</div>
+
+<div class="mb-2">
+    <label>Number of top-ranked combinations:</label>
+    <input id="param-l" type="number" class="form-control form-control-sm" value="{{ l|default(1) }}">
+</div>
+
+<div class="mb-2">
+    <label>Number of top-ranked combinations w/o overlapping subsets:</label>
+    <input id="param-n" type="number" class="form-control form-control-sm" value="{{ n|default(0) }}">
+</div>
+
+<button id="run-analysis-btn" class="btn btn-danger btn-sm">Run Analysis</button>
+{% endblock sidebar %}
+
+analysis.py
+# analysis.py
+import pandas as pd
+import itertools
+import gc
+import time
+from math import comb
+import sqlite3
+from database import get_db_connection
+import heapq
+from config import Config
+
+def check_common_subsets(combo, k, draws, start_idx):
+    """
+    Check if combo has any common k-number subsets with draws starting from start_idx.
+    Returns (draws_until_match, remaining_draws) tuple. If no match found,
+    draws_until_match will be None and remaining_draws will contain count of checked draws.
+    """
+    combo_subsets = set(tuple(sorted(s)) for s in itertools.combinations(combo, k))
+
+    remaining_draws = len(draws) - start_idx
+    for idx, draw in enumerate(draws[start_idx:], 1):
+        draw_nums = [x for x in draw if x is not None]
+        draw_subsets = set(tuple(sorted(s)) for s in itertools.combinations(draw_nums, k))
+
+        if combo_subsets & draw_subsets:  # if there's any intersection
+            return idx, None
+
+    return None, remaining_draws
+
+def run_analysis_chain(game_type, j, k, m, last_offset, progress_callback=None, should_stop=lambda: False):
+    """
+    Runs a chain of analyses, starting from initial offset and continuing until no more draws to check.
+    """
+    chain_results = []
+    current_offset = last_offset
+    total_draws = None
+    rows = None
+
+    while True:
+        if should_stop():
+            break
+
+        if total_draws is None:
+            conn = get_db_connection(game_type)
+            c = conn.cursor()
+            total_draws = c.execute("SELECT COUNT(*) as cnt FROM draws").fetchone()["cnt"]
+            rows = c.execute(
+                "SELECT number1, number2, number3, number4, number5, number6 FROM draws "
+                "ORDER BY sort_order"
+            ).fetchall()
+            conn.close()
+
+        if current_offset >= total_draws:
+            break
+
+        if current_offset < 0:
+            current_offset = 0
+
+        use_count = total_draws - current_offset
+        subset_occurrence_dict = {}
+
+        for idx in reversed(range(use_count)):
+            if should_stop():
+                return chain_results
+            row = rows[idx]
+            row_list = [x for x in row if x is not None]
+            weight = (use_count - 1) - idx
+            for subset in itertools.combinations(row_list, k):
+                s = tuple(sorted(subset))
+                if s not in subset_occurrence_dict:
+                    subset_occurrence_dict[s] = weight
+
+        max_number = Config.GAMES[game_type]['max_number']
+        total_combos = comb(max_number, j)
+        count_subsets_in_combo = comb(j, k)
+        best_combo = None
+        best_sort_field = float("-inf")
+        best_metrics = None
+        best_subsets = None
+        processed = 0
+
+        for combo in itertools.combinations(range(1, max_number + 1), j):
+            if should_stop():
+                return chain_results
+
+            processed += 1
+            if progress_callback and processed % 50000 == 0:
+                progress_callback(processed, total_combos)
+
+            sum_occurrences = 0
+            min_val = float("inf")
+            subsets_with_counts = []
+
+            for subset in itertools.combinations(combo, k):
+                s = tuple(sorted(subset))
+                occurrence = subset_occurrence_dict.get(s, 0)
+                subsets_with_counts.append((s, occurrence))
+                sum_occurrences += occurrence
+                if occurrence < min_val:
+                    min_val = occurrence
+
+            avg_rank = sum_occurrences / count_subsets_in_combo
+            sort_field = avg_rank if m == 'avg' else min_val
+
+            if sort_field > best_sort_field:
+                best_sort_field = sort_field
+                best_combo = combo
+                best_metrics = (avg_rank, min_val)
+                best_subsets = subsets_with_counts
+
+        if best_combo is None:
+            break
+
+        draws_until_match, remaining_draws = check_common_subsets(best_combo, k, rows, len(rows) - current_offset)
+
+        chain_results.append({
+            'Offset': current_offset,
+            'Combination': str(best_combo),
+            'Average Rank': best_metrics[0],
+            'MinValue': best_metrics[1],
+            'Subsets': str(best_subsets),
+            'Draws Until Common Subset': str(draws_until_match - 1) if draws_until_match is not None else str(remaining_draws),
+            'Analysis Start Draw': total_draws - current_offset,
+            'Draw Count': current_offset,
+        })
+
+        if draws_until_match is None:
+            break
+
+        current_offset = current_offset - draws_until_match
+
+    return chain_results
+
+def run_analysis(game_type='6_42', j=6, k=3, m='min', l=1, n=0,
+                 last_offset=0,
+                 progress_callback=None,
+                 should_stop=lambda: False):
+    """
+    Main analysis function that handles both regular and chain analysis.
+    Chain analysis is triggered when l=-1.
+    """
+    start_time = time.time()
+
+    if l == -1:  # Chain analysis when l=-1, regardless of n value
+        chain_results = run_analysis_chain(game_type, j, k, m, last_offset, progress_callback, should_stop)
+        if not chain_results:
+            return None, None, 0
+        top_df = pd.DataFrame(chain_results)
+        selected_df = None
+    else:
+        conn = get_db_connection(game_type)
+        c = conn.cursor()
+
+        row_count = c.execute("SELECT COUNT(*) as cnt FROM draws").fetchone()["cnt"]
+        if last_offset < 0:
+            last_offset = 0
+        if last_offset > row_count:
+            last_offset = row_count
+
+        use_count = row_count - last_offset
+        if use_count < 1:
+            conn.close()
+            return None, None, 0
+
+        rows = c.execute(
+            "SELECT number1, number2, number3, number4, number5, number6 FROM draws "
+            "ORDER BY sort_order LIMIT ?",
+            (use_count,)
+        ).fetchall()
+        conn.close()
+
+        if should_stop():
+            return None, None, 0
+
+        toto_draws = len(rows)
+
+        subset_occurrence_dict = {}
+        for idx in reversed(range(toto_draws)):
+            if should_stop():
+                return None, None, 0
+            row = rows[idx]
+            row_list = [x for x in row if x is not None]
+            weight = (toto_draws - 1) - idx
+            for subset in itertools.combinations(row_list, k):
+                s = tuple(sorted(subset))
+                if s not in subset_occurrence_dict:
+                    subset_occurrence_dict[s] = weight
+        gc.collect()
+
+        max_number = Config.GAMES[game_type]['max_number']
+        total_combos = comb(max_number, j)
+        count_subsets_in_combo = comb(j, k)
+        top_heap = []
+        processed = 0
+
+        for combo in itertools.combinations(range(1, max_number + 1), j):
+            if should_stop():
+                return None, None, 0
+            processed += 1
+
+            if progress_callback and processed % 50000 == 0:
+                progress_callback(processed, total_combos)
+
+            sum_occurrences = 0
+            min_val = float("inf")
+            subsets_with_counts = []
+
+            for subset in itertools.combinations(combo, k):
+                s = tuple(sorted(subset))
+                occurrence = subset_occurrence_dict.get(s, 0)
+                subsets_with_counts.append((s, occurrence))
+                sum_occurrences += occurrence
+                if occurrence < min_val:
+                    min_val = occurrence
+
+            avg_rank = sum_occurrences / count_subsets_in_combo
+            sort_field = avg_rank if m == 'avg' else min_val
+
+            if len(top_heap) < l:
+                heapq.heappush(top_heap, (sort_field, combo, (avg_rank, min_val), subsets_with_counts))
+            else:
+                if sort_field > top_heap[0][0]:
+                    heapq.heapreplace(top_heap, (sort_field, combo, (avg_rank, min_val), subsets_with_counts))
+
+        if progress_callback:
+            progress_callback(total_combos, total_combos)
+
+        top_list = list(top_heap)
+        top_list.sort(key=lambda x: x[0], reverse=True)
+        sorted_combinations = [(item[1], item[2], item[3]) for item in top_list]
+
+        top_data = []
+        for cmb, vals, subs in sorted_combinations:
+            top_data.append({
+                'Combination': str(cmb),
+                'Average Rank': vals[0],
+                'MinValue': vals[1],
+                'Subsets': str(subs)
+            })
+        top_df = pd.DataFrame(top_data)
+
+        if n == 0:
+            selected_df = None
+        else:
+            selected_data = []
+            seen_subsets = set()
+            for cmb, vals, subs in sorted_combinations:
+                subset_list = [(s[0], s[1]) for s in eval(str(subs))]
+                subset_tuples = [s[0] for s in subset_list]
+
+                if not any(s in seen_subsets for s in subset_tuples):
+                    selected_data.append({
+                        'Combination': str(cmb),
+                        'Average Rank': vals[0],
+                        'MinValue': vals[1],
+                        'Subsets': str(subs)
+                    })
+                    seen_subsets.update(subset_tuples)
+
+                    if len(selected_data) >= n:
+                        break
+
+            selected_df = pd.DataFrame(selected_data)
+
+    elapsed = round(time.time() - start_time)
+    return selected_df, top_df, elapsed
+
+app.py
+# app.py
+from flask import Flask, render_template, request, make_response, jsonify, redirect, url_for, session
+from flask_session import Session
+from database import *
+from analysis import run_analysis
+import io
+import pandas as pd
+import threading
+from config import Config
+import time
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'your-secret-key-here'
+app.config['SESSION_TYPE'] = 'filesystem'
+app.config['SESSION_PERMANENT'] = False
+Session(app)
+
+analysis_in_progress = False
+analysis_processed = 0
+analysis_total = 0
+analysis_selected_df = None
+analysis_top_df = None
+analysis_elapsed = None
+analysis_thread = None
+analysis_cancel_requested = False
+
+@app.context_processor
+def utility_processor():
+    return dict(config=Config)
+
+@app.route('/')
+def index():
+    return render_template('index.html', games=Config.GAMES)
+
+@app.route('/select_game/<game_type>')
+def select_game(game_type):
+    if game_type not in Config.GAMES:
+        return redirect(url_for('index'))
+    session['game_type'] = game_type
+    game_config = Config.GAMES[game_type]
+    return render_template('game_options.html', game_type=game_type, game_config=game_config)
+
+@app.route('/combos', methods=['GET'])
+def combos():
+    game_type = session.get('game_type', '6_42')
+    if not game_type:
+        return redirect(url_for('index'))
+    limit = request.args.get('limit', 20, type=int)
+    offset = request.args.get('offset', 0, type=int)
+    total_count = count_draws(game_type)
+    return render_template('combos.html',
+        limit=limit,
+        offset=offset,
+        total_count=total_count,
+        game_config=Config.GAMES[game_type]
+    )
+
+@app.route('/analysis_start', methods=['GET'])
+def analysis_start():
+    game_type = session.get('game_type', '6_42')
+    if not game_type:
+        return redirect(url_for('index'))
+    game_config = Config.GAMES[game_type]
+    # We want n-number subsets default to 6, not 42
+    j_default = 6
+
+    return render_template(
+        'results.html',
+        game_config=game_config,
+        selected_df=None,
+        top_df=None,
+        elapsed=None,
+        j=j_default,  # changed default from 42 to 6
+        k=3,
+        m='min',
+        l=1,
+        n=0,
+        offset_last=0  # default offset is 0
+    )
+
+@app.route('/combos_data', methods=['GET'])
+def combos_data():
+    game_type = session.get('game_type', '6_42')
+    limit = request.args.get('limit', 20, type=int)
+    offset = request.args.get('offset', 0, type=int)
+    draws = get_draws(game_type, limit=limit, offset=offset)
+    data = []
+    for d in draws:
+        data.append([
+            d['draw_number'],
+            d['number1'],
+            d['number2'],
+            d['number3'],
+            d['number4'],
+            d['number5'],
+            d['number6'],
+            d['id']
+        ])
+    return jsonify(data)
+
+@app.route('/update_combo_hot', methods=['POST'])
+def update_combo_hot():
+    game_type = session.get('game_type', '6_42')
+    draw_id = request.form.get('id', type=int)
+    nums = [
+        request.form.get('num1', type=int),
+        request.form.get('num2', type=int),
+        request.form.get('num3', type=int),
+        request.form.get('num4', type=int),
+        request.form.get('num5', type=int),
+        request.form.get('num6', type=int),
+    ]
+    update_draw(draw_id, nums, game_type)
+    return "OK"
+
+@app.route('/add_combo_hot', methods=['POST'])
+def add_combo_hot():
+    game_type = session.get('game_type', '6_42')
+    after_id = request.form.get('after_id', type=int)
+    insert_draw([None, None, None, None, None, None], game_type, after_id=after_id)
+    return "OK"
+
+@app.route('/delete_combos_hot', methods=['POST'])
+def delete_combos_hot():
+    game_type = session.get('game_type', '6_42')
+    ids = request.form.getlist('ids[]', type=int)
+    if not ids:
+        return "No IDs", 400
+    delete_draws(ids, game_type)
+    return "OK"
+
+@app.route('/move_row_hot', methods=['POST'])
+def move_row_hot():
+    game_type = session.get('game_type', '6_42')
+    new_order = request.form.getlist('new_order[]', type=int)
+    conn = get_db_connection(game_type)
+    c = conn.cursor()
+    for i, id_val in enumerate(new_order, start=1):
+        c.execute("UPDATE draws SET sort_order=? WHERE id=?", (i, id_val))
+    conn.commit()
+    conn.close()
+    renumber_all(game_type)
+    return "OK"
+
+@app.route('/download_all_combos', methods=['GET'])
+def download_all_combos():
+    game_type = session.get('game_type', '6_42')
+    rows = get_all_draws(game_type)
+    df = pd.DataFrame([[
+        row['draw_number'],
+        row['number1'],
+        row['number2'],
+        row['number3'],
+        row['number4'],
+        row['number5'],
+        row['number6']
+    ] for row in rows], columns=['Draw', '#1', '#2', '#3', '#4', '#5', '#6'])
+    output = io.StringIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
+    response = make_response(output.getvalue())
+    response.headers["Content-Disposition"] = "attachment; filename=all_combos.csv"
+    response.headers["Content-type"] = "text/csv"
+    return response
+
+@app.route('/analysis', methods=['GET'])
+def analysis_route():
+    game_type = session.get('game_type', '6_42')
+    j = request.args.get('j', 6, type=int)
+    k = request.args.get('k', 3, type=int)
+    m = request.args.get('m', 'min')
+    l = request.args.get('l', 1, type=int)
+    n_val = request.args.get('n', 0, type=int)
+    offset_last = request.args.get('offset_last', 0, type=int)  # keep offset visible
+    global analysis_selected_df, analysis_top_df, analysis_elapsed
+
+    return render_template(
+        'results.html',
+        j=j, k=k, m=m, l=l, n=n_val,
+        offset_last=offset_last,
+        selected_df=analysis_selected_df,
+        top_df=analysis_top_df,
+        elapsed=analysis_elapsed,
+        game_config=Config.GAMES[game_type]
+    )
+
+@app.route('/analysis_run', methods=['POST'])
+def analysis_run():
+    global analysis_in_progress, analysis_processed, analysis_total
+    global analysis_selected_df, analysis_top_df, analysis_elapsed
+    global analysis_thread, analysis_cancel_requested
+
+    game_type = session.get('game_type', '6_42')
+    j = request.form.get('j', type=int, default=6)
+    k = request.form.get('k', type=int, default=3)
+    m = request.form.get('m', type=str, default='min')
+    l = request.form.get('l', type=int, default=1)
+    n_val = request.form.get('n', type=int, default=0)
+    offset_val = request.form.get('offset_last', type=int, default=0)  # new offset param
+
+    # If there's an existing analysis in progress, cancel it
+    if analysis_in_progress:
+        analysis_cancel_requested = True
+        if analysis_thread and analysis_thread.is_alive():
+            analysis_thread.join()
+        analysis_cancel_requested = False
+        analysis_in_progress = False
+
+    analysis_in_progress = True
+    analysis_processed = 0
+    analysis_total = 0
+    analysis_selected_df = None
+    analysis_top_df = None
+    analysis_elapsed = None
+
+    def progress_callback(processed, total):
+        global analysis_processed, analysis_total
+        analysis_processed = processed
+        analysis_total = total
+
+    def should_stop():
+        return analysis_cancel_requested
+
+    def worker():
+        global analysis_in_progress, analysis_selected_df, analysis_top_df, analysis_elapsed
+        sel_df, top_df, elapsed = run_analysis(
+            game_type=game_type,
+            j=j, k=k, m=m, l=l, n=n_val,
+            last_offset=offset_val,
+            progress_callback=progress_callback,
+            should_stop=should_stop
+        )
+        analysis_selected_df = sel_df
+        analysis_top_df = top_df
+        analysis_elapsed = elapsed
+        analysis_in_progress = False
+
+    analysis_thread = threading.Thread(target=worker)
+    analysis_thread.start()
+    return "OK"
+
+@app.route('/analysis_progress', methods=['GET'])
+def analysis_progress():
+    global analysis_in_progress, analysis_processed, analysis_total, analysis_elapsed
+    resp = {
+        'in_progress': analysis_in_progress,
+        'processed': analysis_processed,
+        'total': analysis_total,
+        'done': (not analysis_in_progress) and (analysis_elapsed is not None),
+        'elapsed': analysis_elapsed
+    }
+    return jsonify(resp)
+
+@app.route('/download_selected_csv', methods=['GET'])
+def download_selected_csv():
+    global analysis_selected_df
+    if analysis_selected_df is None:
+        return "No analysis run yet", 400
+    output = io.StringIO()
+    analysis_selected_df.to_csv(output, index=False)
+    output.seek(0)
+    response = make_response(output.getvalue())
+    response.headers["Content-Disposition"] = "attachment; filename=selected_combinations.csv"
+    response.headers["Content-type"] = "text/csv"
+    return response
+
+@app.route('/download_top_csv', methods=['GET'])
+def download_top_csv():
+    global analysis_top_df
+    if analysis_top_df is None:
+        return "No analysis run yet", 400
+    output = io.StringIO()
+    analysis_top_df.to_csv(output, index=False)
+    output.seek(0)
+    response = make_response(output.getvalue())
+    response.headers["Content-Disposition"] = "attachment; filename=top_combinations.csv"
+    response.headers["Content-type"] = "text/csv"
+    return response
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
+
+
+# if __name__ == '__main__':
+#     app.run(debug=True)  # for local development
+
+database.py
+# database.py
+
+import sqlite3
+import pandas as pd
+from config import Config
+
+def get_db_connection(game_type='6_42'):
+    db_path = Config.GAMES[game_type]['db_name']
+    conn = sqlite3.connect(db_path, timeout=5)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def renumber_all(game_type='6_42'):
+    conn = get_db_connection(game_type)
+    c = conn.cursor()
+    rows = c.execute("SELECT id FROM draws ORDER BY sort_order").fetchall()
+    for i, row in enumerate(rows, start=1):
+        draw_number = f"{i:04d}"
+        c.execute("UPDATE draws SET sort_order=?, draw_number=? WHERE id=?",
+                  (i, draw_number, row['id']))
+    conn.commit()
+    conn.close()
+
+def get_draws(game_type='6_42', limit=100, offset=0):
+    conn = get_db_connection(game_type)
+    draws = conn.execute(
+        "SELECT * FROM draws ORDER BY sort_order LIMIT ? OFFSET ?",
+        (limit, offset)
+    ).fetchall()
+    conn.close()
+    return draws
+
+def count_draws(game_type='6_42'):
+    conn = get_db_connection(game_type)
+    count = conn.execute("SELECT COUNT(*) as cnt FROM draws").fetchone()["cnt"]
+    conn.close()
+    return count
+
+def insert_draw(numbers, game_type='6_42', after_id=None):
+    numbers = clamp_numbers(numbers, game_type)
+    conn = get_db_connection(game_type)
+    c = conn.cursor()
+
+    if after_id:
+        row = c.execute("SELECT sort_order FROM draws WHERE id=?", (after_id,)).fetchone()
+        if row:
+            after_sort = row["sort_order"]
+            c.execute("UPDATE draws SET sort_order = sort_order + 1 WHERE sort_order > ?", (after_sort,))
+            new_sort_order = after_sort + 1
+        else:
+            max_so = c.execute("SELECT MAX(sort_order) FROM draws").fetchone()[0]
+            new_sort_order = (max_so or 0) + 1
+    else:
+        max_so = c.execute("SELECT MAX(sort_order) FROM draws").fetchone()[0]
+        new_sort_order = (max_so or 0) + 1
+
+    draw_number = "temp"
+    c.execute('''
+        INSERT INTO draws (draw_number, number1, number2, number3, number4, number5, number6, sort_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (draw_number, *numbers, new_sort_order))
+    conn.commit()
+    conn.close()
+
+    renumber_all(game_type)
+
+def delete_draw(draw_id, game_type='6_42'):
+    conn = get_db_connection(game_type)
+    conn.execute("DELETE FROM draws WHERE id = ?", (draw_id,))
+    conn.commit()
+    conn.close()
+    renumber_all(game_type)
+
+def delete_draws(ids, game_type='6_42'):
+    conn = get_db_connection(game_type)
+    q_marks = ",".join("?" for _ in ids)
+    sql = f"DELETE FROM draws WHERE id IN ({q_marks})"
+    conn.execute(sql, ids)
+    conn.commit()
+    conn.close()
+    renumber_all(game_type)
+
+def update_draw(draw_id, numbers, game_type='6_42'):
+    numbers = clamp_numbers(numbers, game_type)
+    conn = get_db_connection(game_type)
+    conn.execute('''
+        UPDATE draws
+        SET number1=?, number2=?, number3=?, number4=?, number5=?, number6=?
+        WHERE id=?
+    ''', (*numbers, draw_id))
+    conn.commit()
+    conn.close()
+
+def get_all_draws(game_type='6_42'):
+    conn = get_db_connection(game_type)
+    rows = conn.execute("SELECT * FROM draws ORDER BY sort_order").fetchall()
+    conn.close()
+    return rows
+
+def swap_sort_order(id1, id2, game_type='6_42'):
+    conn = get_db_connection(game_type)
+    c = conn.cursor()
+    so1 = c.execute("SELECT sort_order FROM draws WHERE id=?", (id1,)).fetchone()["sort_order"]
+    so2 = c.execute("SELECT sort_order FROM draws WHERE id=?", (id2,)).fetchone()["sort_order"]
+    c.execute("UPDATE draws SET sort_order=? WHERE id=?", (so2, id1))
+    c.execute("UPDATE draws SET sort_order=? WHERE id=?", (so1, id2))
+    conn.commit()
+    conn.close()
+    renumber_all(game_type)
+
+def clamp_numbers(nums, game_type='6_42'):
+    max_number = Config.GAMES[game_type]['max_number']
+    cleaned = []
+    for n in nums:
+        if n is None:
+            cleaned.append(None)
+        else:
+            if n < 1:
+                n = 1
+            if n > max_number:
+                n = max_number
+            cleaned.append(n)
+    return cleaned
+
+init_database.py
+# init_database.py
+import pandas as pd
+import sqlite3
+import sys
+from config import Config
+
+def init_db(game_type):
+    game_config = Config.GAMES[game_type]
+    max_number = game_config['max_number']
+    conn = sqlite3.connect(game_config['db_name'])
+    c = conn.cursor()
+
+    c.execute('DROP TABLE IF EXISTS draws')
+
+    max_number = game_config['max_number']
+    c.execute(f'''
+        CREATE TABLE draws (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            draw_number TEXT,
+            number1 INTEGER CHECK (number1 IS NULL OR (number1 >= 1 AND number1 <= {max_number})),
+            number2 INTEGER CHECK (number2 IS NULL OR (number2 >= 1 AND number2 <= {max_number})),
+            number3 INTEGER CHECK (number3 IS NULL OR (number3 >= 1 AND number3 <= {max_number})),
+            number4 INTEGER CHECK (number4 IS NULL OR (number4 >= 1 AND number4 <= {max_number})),
+            number5 INTEGER CHECK (number5 IS NULL OR (number5 >= 1 AND number5 <= {max_number})),
+            number6 INTEGER CHECK (number6 IS NULL OR (number6 >= 1 AND number6 <= {max_number})),
+            sort_order INTEGER
+        )
+    ''')
+
+    conn.commit()
+    return conn
+
+def load_csv_to_db(game_type):
+    try:
+        game_config = Config.GAMES[game_type]
+        df = pd.read_csv(game_config['csv_file'], header=None)
+        df = df.iloc[1:].reset_index(drop=True)
+        df['draw_number'] = df.index.map(lambda x: f'{x+1:04d}')
+
+        conn = init_db(game_type)
+        cursor = conn.cursor()
+
+        for index, row in df.iterrows():
+            numbers = sorted(row.iloc[:6].astype(int).tolist())
+            draw_number = row['draw_number']
+            cursor.execute('''
+                INSERT INTO draws (draw_number, number1, number2, number3, number4, number5, number6)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (draw_number, *numbers))
+
+        cursor.execute("UPDATE draws SET sort_order = id")
+        conn.commit()
+        conn.close()
+
+        print(f"Successfully loaded {len(df)} draws into {game_config['db_name']}")
+        return True
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return False
+
+if __name__ == "__main__":
+    for game_type in Config.GAMES:
+        print(f"\nInitializing database for {Config.GAMES[game_type]['name']}...")
+        success = load_csv_to_db(game_type)
+        if not success:
+            sys.exit(1)
+
+config.py
+# config.py (new file)
+class Config:
+    GAMES = {
+        '6_42': {
+            'name': 'Toto 6/42',
+            'max_number': 42,
+            'db_name': 'toto_6_42_draws.db',
+            'csv_file': 'Toto_6_42_with_first_row.csv'
+        },
+        '6_49': {
+            'name': 'Toto 6/49',
+            'max_number': 49,
+            'db_name': 'toto_6_49_draws.db',
+            'csv_file': 'Toto_6_49_with_first_row.csv'
+        }
+    }
+
+requirements.txt
+gunicorn==21.2.0
+Flask==2.2.2
+pandas==1.5.3
+statistics;python_version<"3.10"
+seaborn==0.12.0
+tqdm==4.66.1
+Flask-Session==0.5.0
+numpy==1.23.2
+itsdangerous==2.0.0
+Werkzeug==2.2.2
+click==8.0.0
+Jinja2==3.0.0
+MarkupSafe==2.1.1
+
+</current_code>
+
+<goals>
+
+</goals>
+
+
+

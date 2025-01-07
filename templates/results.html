@@ -26,22 +26,36 @@
     {% if top_df is not none %}
     <small class="text-muted">Completed in {{ elapsed }} seconds.</small>
 
-    <h6 class="mt-3 mb-2">Top-ranked combinations:</h6>
+    <h6 class="mt-3 mb-2">{% if l == -1 %}Analysis Chain Results:{% else %}Top-ranked combinations:{% endif %}</h6>
     <table class="table table-sm table-striped table-hover">
         <thead>
             <tr>
+                {% if l == -1 %}
+                <th style="width: 100px;">Analysis #</th>
+                <th style="width: 100px;">For Draw</th>
+                {% endif %}
                 <th style="width: 180px;">Combination</th>
                 <th style="width: 100px;">Avg Rank</th>
                 <th style="width: 100px;">Min Rank</th>
+                {% if l == -1 %}
+                <th style="width: 180px;">Top-Ranked Duration</th>
+                {% endif %}
                 <th>Subsets <small class="text-muted">(click to expand)</small></th>
             </tr>
         </thead>
         <tbody>
         {% for idx, row in top_df.iterrows() %}
             <tr>
+                {% if l == -1 %}
+                <td>{{ idx + 1 }}</td>
+                <td>{{ row['Analysis Start Draw'] }}</td>
+                {% endif %}
                 <td>{{ row['Combination'] }}</td>
                 <td>{{ "%.2f"|format(row['Average Rank']) }}</td>
                 <td>{{ row['MinValue'] }}</td>
+                {% if l == -1 %}
+                <td>{{ row['Draws Until Common Subset'] }}</td>
+                {% endif %}
                 <td class="subset-cell">
                     <span class="subset-preview">{{ row['Subsets'][:50] }}...</span>
                     <span class="subset-full" style="display: none;">{{ row['Subsets'] }}</span>
@@ -52,7 +66,6 @@
     </table>
 
     <a href="{{ url_for('download_top_csv') }}" class="btn btn-info btn-sm">Download Top CSV</a>
-    {% endif %}
 
     {% if selected_df is not none %}
     <h6 class="mt-4 mb-2">Top-ranked combinations w/o overlapping subsets:</h6>
@@ -79,8 +92,8 @@
         {% endfor %}
         </tbody>
     </table>
-
     <a href="{{ url_for('download_selected_csv') }}" class="btn btn-info btn-sm">Download Selected CSV</a>
+    {% endif %}
     {% endif %}
 </div>
 
@@ -121,7 +134,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function createParams() {
         const params = new URLSearchParams();
-        // read the offset from #param-offset-last
         const offsetEl = document.getElementById('param-offset-last');
         let offsetVal = offsetEl ? offsetEl.value : "0";
 
@@ -135,7 +147,6 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function startAnalysis() {
-        // Hide results
         resultsContainer.style.display = 'none';
         progressContainer.style.display = 'block';
         progressBar.style.width = '0%';
@@ -170,7 +181,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 progressBar.style.width = '100%';
                 progressDetail.textContent = `Elapsed time: ${data.elapsed} seconds.`;
 
-                // Refresh results
                 const url = new URL('/analysis', window.location.href);
                 const params = createParams();
                 params.forEach((value, key) => url.searchParams.set(key, value));
@@ -217,7 +227,6 @@ document.addEventListener('DOMContentLoaded', function() {
 {% block sidebar %}
 <h5 class="mt-3">Parameters</h5>
 
-{# offset from last draws #}
 <div class="mb-2">
     <label>Offset from last draw:</label>
     <input id="param-offset-last" type="number" class="form-control form-control-sm"
@@ -226,28 +235,31 @@ document.addEventListener('DOMContentLoaded', function() {
 
 <div class="mb-2">
     <label>n-number subsets of {{ game_config.max_number }}:</label>
-    {# default changed to j (6) in the app #}
     <input id="param-j" type="number" class="form-control form-control-sm" value="{{ j }}">
 </div>
+
 <div class="mb-2">
     <label>k-number subsets of n:</label>
     <input id="param-k" type="number" class="form-control form-control-sm" value="{{ k }}">
 </div>
+
 <div class="mb-2">
     <label>Sorting option:</label>
     <select id="param-m" class="form-select form-select-sm">
         <option value="avg" {% if m=='avg' %}selected{% endif %}>avg</option>
-        <!-- <option value="r" {% if m=='r' %}selected{% endif %}>r</option> -->
         <option value="min" {% if m=='min' or not m %}selected{% endif %}>min</option>
     </select>
 </div>
+
 <div class="mb-2">
     <label>Number of top-ranked combinations:</label>
     <input id="param-l" type="number" class="form-control form-control-sm" value="{{ l|default(1) }}">
 </div>
+
 <div class="mb-2">
     <label>Number of top-ranked combinations w/o overlapping subsets:</label>
     <input id="param-n" type="number" class="form-control form-control-sm" value="{{ n|default(0) }}">
 </div>
+
 <button id="run-analysis-btn" class="btn btn-danger btn-sm">Run Analysis</button>
 {% endblock sidebar %}
