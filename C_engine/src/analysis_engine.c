@@ -6,219 +6,267 @@
 
 #include "analysis_engine.h"
 
-/*
- * This version replicates your Python logic exactly (for normal and chain analysis),
- * but also:
- *   - Manually ensures null termination in strncpy calls (no truncation warning).
- *   - Adds simple sanity checks for j and out_len to silence large allocation warnings.
- * Thus, it returns the same results as your second screenshot while avoiding warnings.
- */
+#define MAX_COMBO_STR 255
+#define MAX_SUBSETS_STR 511
+#define MAX_ALLOWED_J 200
+#define MAX_ALLOWED_OUT_LEN 1000000
+#define MAX_NUMBERS 50
+#define HASH_SIZE (1 << 20)  // 1M entries
+#define CACHE_LINE 64
 
-#define MAX_COMBO_STR 255   // combination[] field length
-#define MAX_SUBSETS_STR 511 // subsets[] field length
+typedef unsigned long long uint64;
+typedef unsigned int uint32;
 
-// If you want a different upper bound, adjust these:
-#define MAX_ALLOWED_J 200      // combos bigger than 200 are unrealistic for TOTO
-#define MAX_ALLOWED_OUT_LEN 1000000  // 1 million, just a safe upper bound
-
-/*
- * Compute nCr (combinations).
- */
-static long long comb_ll(int n, int r) {
-    if (r > n) return 0;
-    if (r == 0 || r == n) return 1;
-    long long result = 1;
-    for (int i = 1; i <= r; i++) {
-        result = result * (n - r + i) / i;
-    }
-    return result;
-}
-
-/*
- * Move from one ascending combination to the next.
- * Returns 1 if advanced, 0 if done.
- */
-static int next_combination(int *comb, int k, int n) {
-    int rpos = k - 1;
-    while (rpos >= 0 && comb[rpos] == (n - k + rpos + 1)) {
-        rpos--;
-    }
-    if (rpos < 0) {
-        return 0;
-    }
-    comb[rpos]++;
-    for (int i = rpos + 1; i < k; i++) {
-        comb[i] = comb[i - 1] + 1;
-    }
-    return 1;
-}
-
-/*
- * SubsetOccDict for storing k-subset weights.
- */
+// Optimized subset hash table
 typedef struct {
-    long long *subset_weights;
-    int max_subsets;
-    int subset_size;
-    int max_number;
-} SubsetOccDict;
+    uint64* keys;     // Subset bit patterns
+    int* values;      // Last occurrence
+    int size;         // Current size
+    int capacity;     // Max capacity
+} SubsetTable;
 
-/*
- * Create / free.
- */
-static SubsetOccDict* create_subset_occdict(int max_number, int k) {
-    SubsetOccDict* d = (SubsetOccDict*)calloc(1, sizeof(SubsetOccDict));
-    d->max_number = max_number;
-    d->subset_size = k;
-    d->max_subsets = (int)comb_ll(max_number, k);
-    d->subset_weights = (long long*)calloc(d->max_subsets, sizeof(long long));
-    return d;
-}
+// Pre-computed combinatorial numbers
+static uint64 nCk_table[MAX_NUMBERS][MAX_NUMBERS];
+// Pre-computed bit counts
+static int bit_count_table[256];
+static int initialized = 0;
 
-static void free_subset_occdict(SubsetOccDict* d) {
-    if (!d) return;
-    free(d->subset_weights);
-    free(d);
-}
+// SIMD-friendly combo stats
+typedef struct __attribute__((aligned(16))) {
+    uint64 pattern;   // Bit pattern of combo
+    double avg_rank;
+    double min_rank;
+    int combo[MAX_NUMBERS];
+    int len;
+} ComboStats;
 
-/*
- * Map a sorted subset[] of size k to an index in [0..comb(max_number,k)-1].
- */
-static int subset_to_index(const int* subset, int k, int max_number) {
-    long long rank = 0;
-    int start = 1;
-    for (int i = 0; i < k; i++) {
-        int x = subset[i];
-        for (int val = start; val < x; val++) {
-            rank += comb_ll(max_number - val, k - i - 1);
+// Initialize lookup tables
+static void init_tables() {
+    if (initialized) return;
+
+    // Compute nCk table
+    memset(nCk_table, 0, sizeof(nCk_table));
+    for (int n = 0; n < MAX_NUMBERS; n++) {
+        nCk_table[n][0] = 1;
+        for (int k = 1; k <= n; k++) {
+            nCk_table[n][k] = nCk_table[n-1][k-1] + nCk_table[n-1][k];
         }
-        start = x + 1;
     }
-    return (int)rank;
+
+    // Pre-compute bit count table
+    for (int i = 0; i < 256; i++) {
+        int count = 0;
+        for (int j = 0; j < 8; j++) {
+            if (i & (1 << j)) count++;
+        }
+        bit_count_table[i] = count;
+    }
+
+    initialized = 1;
 }
 
-/*
- * Add 'weight' to each k-subset of 'numbers'.
- * 'numbers' is sorted, up to 6 elements for TOTO draws.
- */
-static void update_subset_occdict(SubsetOccDict* d, const int* numbers, int count, long long weight) {
-    if (!d || d->subset_size > count) return;
-
-    int k = d->subset_size;
-    int comb[20];
-    for (int i = 0; i < k; i++) {
-        comb[i] = i;
+// Fast popcount using lookup table
+static inline int popcount(uint64 x) {
+    int count = 0;
+    for (int i = 0; i < 8; i++) {
+        count += bit_count_table[x & 0xFF];
+        x >>= 8;
     }
+    return count;
+}
+
+// Create subset hash table
+static SubsetTable* create_subset_table(int max_entries) {
+    SubsetTable* table = (SubsetTable*)malloc(sizeof(SubsetTable));
+    table->size = 0;
+    table->capacity = max_entries;
+
+    table->keys = (uint64*)calloc(max_entries, sizeof(uint64));
+    table->values = (int*)malloc(max_entries * sizeof(int));
+    memset(table->values, -1, max_entries * sizeof(int));
+
+    return table;
+}
+
+static void free_subset_table(SubsetTable* table) {
+    if (!table) return;
+    free(table->keys);
+    free(table->values);
+    free(table);
+}
+
+// Fast hash function for subsets
+static inline uint32 hash_subset(uint64 pattern) {
+    pattern ^= pattern >> 33;
+    pattern *= 0xff51afd7ed558ccdull;
+    pattern ^= pattern >> 33;
+    pattern *= 0xc4ceb9fe1a85ec53ull;
+    pattern ^= pattern >> 33;
+    return (uint32)(pattern & (HASH_SIZE - 1));
+}
+
+// Insert subset into hash table
+static inline void insert_subset(SubsetTable* table, uint64 pattern, int value) {
+    uint32 idx = hash_subset(pattern);
     while (1) {
-        int temp[20];
+        if (table->values[idx] == -1 || table->keys[idx] == pattern) {
+            table->keys[idx] = pattern;
+            table->values[idx] = value;
+            return;
+        }
+        idx = (idx + 1) & (HASH_SIZE - 1);
+    }
+}
+
+// Look up subset in hash table
+static inline int lookup_subset(const SubsetTable* table, uint64 pattern) {
+    uint32 idx = hash_subset(pattern);
+    while (1) {
+        if (table->values[idx] == -1) return -1;
+        if (table->keys[idx] == pattern) return table->values[idx];
+        idx = (idx + 1) & (HASH_SIZE - 1);
+    }
+}
+
+// Convert numbers to bit pattern
+static inline uint64 numbers_to_pattern(const int* numbers, int count) {
+    uint64 pattern = 0;
+    for (int i = 0; i < count; i++) {
+        pattern |= 1ULL << (numbers[i] - 1);
+    }
+    return pattern;
+}
+
+// Process draw and update subset table
+static void process_draw(const int* draw, int draw_idx, int k, SubsetTable* table) {
+    int indices[20] = {0};
+    for (int i = 0; i < k; i++) indices[i] = i;
+
+    do {
+        uint64 pattern = 0;
         for (int i = 0; i < k; i++) {
-            temp[i] = numbers[comb[i]];
-        }
-        int idx = subset_to_index(temp, k, d->max_number);
-        if (idx >= 0 && idx < d->max_subsets) {
-            d->subset_weights[idx] += weight;
+            pattern |= 1ULL << (draw[indices[i]] - 1);
         }
 
-        int rpos = k - 1;
-        while (rpos >= 0 && comb[rpos] == (rpos + (count - k))) {
-            rpos--;
+        insert_subset(table, pattern, draw_idx);
+
+        // Next k-combination
+        int i = k - 1;
+        while (i >= 0 && indices[i] == 6 - k + i) i--;
+        if (i < 0) break;
+
+        indices[i]++;
+        for (int j = i + 1; j < k; j++) {
+            indices[j] = indices[i] + (j - i);
         }
-        if (rpos < 0) break;
-        comb[rpos]++;
-        for (int j = rpos + 1; j < k; j++) {
-            comb[j] = comb[j - 1] + 1;
-        }
-    }
+    } while (1);
 }
 
-/*
- * Convert an integer combo to "1,2,3,4,5,6".
- */
-static void combo_to_string(const int *combo, int j, char* out_str) {
-    out_str[0] = '\0';
-    char tmp[32];
-    for(int i = 0; i < j; i++){
-        snprintf(tmp, sizeof(tmp), "%d", combo[i]);
-        strcat(out_str, tmp);
-        if(i < j-1) strcat(out_str, ",");
-    }
+// Evaluate a combination
+static void evaluate_combo(const int* combo, int j, int k, int total_draws,
+                         const SubsetTable* table, ComboStats* stats) {
+    double sum_ranks = 0;
+    double min_rank = total_draws;
+    int count = 0;
+
+    int indices[20] = {0};
+    for (int i = 0; i < k; i++) indices[i] = i;
+
+    do {
+        uint64 pattern = 0;
+        for (int i = 0; i < k; i++) {
+            pattern |= 1ULL << (combo[indices[i]] - 1);
+        }
+
+        int last_seen = lookup_subset(table, pattern);
+        double rank = (last_seen >= 0) ? total_draws - last_seen - 1 : total_draws;
+
+        sum_ranks += rank;
+        if (rank < min_rank) min_rank = rank;
+        count++;
+
+        // Next k-combination
+        int i = k - 1;
+        while (i >= 0 && indices[i] == j - k + i) i--;
+        if (i < 0) break;
+
+        indices[i]++;
+        for (int x = i + 1; x < k; x++) {
+            indices[x] = indices[i] + (x - i);
+        }
+    } while (1);
+
+    stats->pattern = numbers_to_pattern(combo, j);
+    stats->avg_rank = sum_ranks / count;
+    stats->min_rank = min_rank;
+    memcpy(stats->combo, combo, j * sizeof(int));
+    stats->len = j;
 }
 
-/*
- * Builds something like "[((2,9,14), 346), ((2,9,21), 281), ...]" for the subsets.
- */
-static void build_subsets_string(
-    int* combo,
-    int j,
-    int k,
-    SubsetOccDict* occ,
-    int max_number,
-    char* out_buf
-) {
-    char big[16384];
-    big[0] = '\0';
-    strcat(big, "[");
-
-    int ccomb[20];
-    for(int i=0; i<k; i++){
-        ccomb[i] = i;
+static void format_combo(const int* combo, int len, char* out) {
+    int pos = 0;
+    for (int i = 0; i < len; i++) {
+        if (i > 0) out[pos++] = ',';
+        pos += sprintf(out + pos, "%d", combo[i]);
     }
-
-    int first_entry = 1;
-    while (1) {
-        int temp[20];
-        for(int x=0; x<k; x++){
-            temp[x] = combo[ccomb[x]];
-        }
-        int idx = subset_to_index(temp, k, max_number);
-        long long w = 0;
-        if(idx >= 0 && idx < occ->max_subsets){
-            w = occ->subset_weights[idx];
-        }
-
-        char subset_str[128];
-        subset_str[0] = '\0';
-        strcat(subset_str, "(");
-        for(int z=0; z<k; z++){
-            char numbuf[32];
-            snprintf(numbuf, sizeof(numbuf), "%d", temp[z]);
-            strcat(subset_str, numbuf);
-            if(z < k-1) strcat(subset_str, ", ");
-        }
-        strcat(subset_str, ")");
-
-        if(!first_entry) {
-            strcat(big, ", ");
-        } else {
-            first_entry = 0;
-        }
-
-        char entry[256];
-        snprintf(entry, sizeof(entry), "(%s, %lld)", subset_str, w);
-        strcat(big, entry);
-
-        int rpos = k - 1;
-        while(rpos >= 0 && ccomb[rpos] == (rpos + (j - k))) {
-            rpos--;
-        }
-        if(rpos < 0) break;
-        ccomb[rpos]++;
-        for(int xx = rpos+1; xx < k; xx++){
-            ccomb[xx] = ccomb[xx-1] + 1;
-        }
-    }
-
-    strcat(big, "]");
-
-    // Truncate to 511 chars, ensure null termination
-    strncpy(out_buf, big, MAX_SUBSETS_STR);
-    out_buf[MAX_SUBSETS_STR] = '\0';
+    out[pos] = '\0';
 }
 
-/*
- * The main analysis function. Exactly replicates your original Python weighting logic:
- * Chain (l == -1) or Normal (top-l).
- */
+static void format_subsets(const int* combo, int j, int k, int total_draws,
+                         const SubsetTable* table, char* out) {
+    int pos = 0;
+    out[pos++] = '[';
+
+    int indices[20] = {0};
+    for (int i = 0; i < k; i++) indices[i] = i;
+
+    int first = 1;
+    do {
+        if (!first) {
+            out[pos++] = ',';
+            out[pos++] = ' ';
+        }
+        first = 0;
+
+        out[pos++] = '(';
+        out[pos++] = '(';
+
+        for (int i = 0; i < k; i++) {
+            if (i > 0) out[pos++] = ',';
+            pos += sprintf(out + pos, "%d", combo[indices[i]]);
+        }
+
+        out[pos++] = ')';
+        out[pos++] = ',';
+        out[pos++] = ' ';
+
+        uint64 pattern = 0;
+        for (int i = 0; i < k; i++) {
+            pattern |= 1ULL << (combo[indices[i]] - 1);
+        }
+
+        int last_seen = lookup_subset(table, pattern);
+        int rank = (last_seen >= 0) ? total_draws - last_seen - 1 : total_draws;
+
+        pos += sprintf(out + pos, "%d)", rank);
+
+        // Next k-combination
+        int i = k - 1;
+        while (i >= 0 && indices[i] == j - k + i) i--;
+        if (i < 0) break;
+
+        indices[i]++;
+        for (int x = i + 1; x < k; x++) {
+            indices[x] = indices[i] + (x - i);
+        }
+
+        if (pos > MAX_SUBSETS_STR - 50) break;
+    } while (1);
+
+    out[pos++] = ']';
+    out[pos] = '\0';
+}
+
 AnalysisResultItem* run_analysis_c(
     const char* game_type,
     int** draws,
@@ -231,481 +279,160 @@ AnalysisResultItem* run_analysis_c(
     int last_offset,
     int* out_len
 ) {
-    // Quick checks to silence large-allocation warnings
-    if (j > MAX_ALLOWED_J) {
-        fprintf(stderr, "Error: j=%d exceeds safety limit %d.\n", j, MAX_ALLOWED_J);
-        *out_len = 0;
+    *out_len = 0;
+    if (j > MAX_ALLOWED_J) return NULL;
+
+    int max_number = strstr(game_type, "6_49") ? 49 : 42;
+    init_tables();
+
+    int use_count = draws_count - last_offset;
+    if (use_count < 1) return NULL;
+
+    // Sort numbers within draws
+    for (int i = 0; i < use_count; i++) {
+        for (int a = 0; a < 5; a++) {
+            for (int b = a + 1; b < 6; b++) {
+                if (draws[i][a] > draws[i][b]) {
+                    int tmp = draws[i][a];
+                    draws[i][a] = draws[i][b];
+                    draws[i][b] = tmp;
+                }
+            }
+        }
+    }
+
+    // Create and populate subset table
+    SubsetTable* table = create_subset_table(HASH_SIZE);
+    for (int i = 0; i < use_count; i++) {
+        process_draw(draws[i], i, k, table);
+    }
+
+    // Allocate space for results and working memory
+    int capacity = l + n;
+    AnalysisResultItem* results = calloc(capacity, sizeof(AnalysisResultItem));
+    if (!results) {
+        free_subset_table(table);
         return NULL;
     }
 
-    int max_number = 42;
-    if (strstr(game_type, "6_49")) {
-        max_number = 49;
+    int* curr_combo = malloc(j * sizeof(int));
+    ComboStats* best_stats = malloc(l * sizeof(ComboStats));
+    if (!curr_combo || !best_stats) {
+        free(curr_combo);
+        free(best_stats);
+        free(results);
+        free_subset_table(table);
+        return NULL;
     }
 
-    *out_len = 0;
-    AnalysisResultItem* results = NULL;
+    // Initialize first combination
+    for (int i = 0; i < j; i++) curr_combo[i] = i + 1;
 
-    // CHAIN analysis if l == -1
-    if (l == -1) {
-        int capacity = 1000;
-        results = (AnalysisResultItem*)calloc(capacity, sizeof(AnalysisResultItem));
-        int total_draws = draws_count;
-        int current_offset = last_offset;
+    int filled = 0;
+    do {
+        ComboStats stats;
+        evaluate_combo(curr_combo, j, k, use_count, table, &stats);
 
-        // Sort ascending
-        for(int i=0; i<draws_count; i++){
-            for(int a=0; a<5; a++){
-                for(int b=a+1; b<6; b++){
-                    if(draws[i][a] > draws[i][b]){
-                        int tmp = draws[i][a];
-                        draws[i][a] = draws[i][b];
-                        draws[i][b] = tmp;
-                    }
-                }
-            }
-        }
+        if (filled < l) {
+            memcpy(&best_stats[filled], &stats, sizeof(ComboStats));
+            filled++;
 
-        while (current_offset >= 0 && current_offset < total_draws) {
-            int use_count = total_draws - current_offset;
-            if(use_count < 1) break;
-
-            SubsetOccDict* occ = create_subset_occdict(max_number, k);
-            // Weighted approach: for idx in reversed(range(use_count))
-            for(int idx = use_count - 1; idx >= 0; idx--){
-                long long weight = (use_count - 1) - idx;
-                update_subset_occdict(occ, draws[idx], 6, weight);
-            }
-
-            // Find best combo
-            int* comb_arr = (int*)malloc(sizeof(int)*j);
-            for(int i=0; i<j; i++){
-                comb_arr[i] = i+1;
-            }
-
-            double best_val = -1e9;
-            double best_avg = 0.0;
-            double best_minv = 0.0;
-            int best_combo[64];
-            char best_subsets[512] = {0};
-
-            do {
-                long long sum_occ = 0;
-                long long min_occ = LLONG_MAX;
-
-                int ccomb[20];
-                for(int i=0; i<k; i++){
-                    ccomb[i] = i;
-                }
-                while(1) {
-                    int temp[20];
-                    for(int x=0; x<k; x++){
-                        temp[x] = comb_arr[ccomb[x]];
-                    }
-                    int idx_s = subset_to_index(temp, k, max_number);
-                    long long w = 0;
-                    if(idx_s>=0 && idx_s<occ->max_subsets){
-                        w = occ->subset_weights[idx_s];
-                    }
-                    sum_occ += w;
-                    if(w < min_occ) min_occ = w;
-
-                    int rpos = k-1;
-                    while(rpos>=0 && ccomb[rpos] == (rpos + (j - k))) rpos--;
-                    if(rpos<0) break;
-                    ccomb[rpos]++;
-                    for(int xx=rpos+1; xx<k; xx++){
-                        ccomb[xx] = ccomb[xx-1]+1;
-                    }
-                }
-
-                double avg_occ = (double)sum_occ / (double)comb_ll(j, k);
-                double sort_field = 0.0;
-                if(strcmp(m, "avg") == 0) {
-                    sort_field = avg_occ;
+            // Keep sorted in descending order
+            for (int i = filled - 1; i > 0; i--) {
+                int swap;
+                if (strcmp(m, "avg") == 0) {
+                    swap = best_stats[i].avg_rank > best_stats[i-1].avg_rank;
                 } else {
-                    sort_field = (double)min_occ;
+                    swap = best_stats[i].min_rank > best_stats[i-1].min_rank;
                 }
 
-                if(sort_field > best_val) {
-                    best_val = sort_field;
-                    best_avg = avg_occ;
-                    best_minv = (double)min_occ;
-                    memcpy(best_combo, comb_arr, j*sizeof(int));
-                    build_subsets_string(best_combo, j, k, occ, max_number, best_subsets);
-                }
-            } while(next_combination(comb_arr, j, max_number));
-
-            free(comb_arr);
-            free_subset_occdict(occ);
-
-            // draws_until_match
-            int draws_until_match = 0;
-            int found = 0;
-            for(int dd = (total_draws - use_count); dd < total_draws; dd++){
-                draws_until_match++;
-                int row[6];
-                memcpy(row, draws[dd], sizeof(int)*6);
-
-                int match_found = 0;
-                int ccomb[20];
-                for(int i=0; i<k; i++){
-                    ccomb[i] = i;
-                }
-                while(!match_found) {
-                    int temp_bc[20];
-                    for(int x=0; x<k; x++){
-                        temp_bc[x] = best_combo[ccomb[x]];
-                    }
-                    int rcomb[20];
-                    for(int i=0; i<k; i++){
-                        rcomb[i] = i;
-                    }
-                    while(1) {
-                        int temp_row[20];
-                        for(int x=0; x<k; x++){
-                            temp_row[x] = row[rcomb[x]];
-                        }
-                        int eq=1;
-                        for(int z=0; z<k; z++){
-                            if(temp_bc[z] != temp_row[z]) {
-                                eq = 0;
-                                break;
-                            }
-                        }
-                        if(eq) {
-                            match_found = 1;
-                            break;
-                        }
-                        int rrpos = k-1;
-                        while(rrpos>=0 && rcomb[rrpos] == (rrpos + (6 - k))) rrpos--;
-                        if(rrpos<0) break;
-                        rcomb[rrpos]++;
-                        for(int xx=rrpos+1; xx<k; xx++){
-                            rcomb[xx] = rcomb[xx-1]+1;
-                        }
-                    }
-                    int rpos = k-1;
-                    while(rpos>=0 && ccomb[rpos] == (rpos + (j - k))) rpos--;
-                    if(rpos<0) break;
-                    ccomb[rpos]++;
-                    for(int xx=rpos+1; xx<k; xx++){
-                        ccomb[xx] = ccomb[xx-1]+1;
-                    }
-                }
-
-                if(match_found) {
-                    found = 1;
-                    break;
-                }
+                if (swap) {
+                    ComboStats tmp = best_stats[i];
+                    best_stats[i] = best_stats[i-1];
+                    best_stats[i-1] = tmp;
+                } else break;
             }
-            if(!found) {
-                draws_until_match = use_count;
-            }
-
-            // Add chain result
-            if(*out_len >= capacity) {
-                capacity *= 2;
-                results = (AnalysisResultItem*)realloc(results, sizeof(AnalysisResultItem)*capacity);
-            }
-            AnalysisResultItem* outR = &results[*out_len];
-            memset(outR, 0, sizeof(AnalysisResultItem));
-            outR->is_chain_result = 1;
-            outR->draw_offset = current_offset;
-            outR->analysis_start_draw = total_draws - current_offset;
-            outR->draws_until_common = draws_until_match - 1;
-
-            char combo_str[512] = {0};
-            combo_to_string(best_combo, j, combo_str);
-            // Copy safely
-            if(strlen(combo_str) >= MAX_COMBO_STR) {
-                strncpy(outR->combination, combo_str, MAX_COMBO_STR - 1);
-                outR->combination[MAX_COMBO_STR - 1] = '\0';
+        } else {
+            int replace;
+            if (strcmp(m, "avg") == 0) {
+                replace = stats.avg_rank > best_stats[l-1].avg_rank;
             } else {
-                strcpy(outR->combination, combo_str);
+                replace = stats.min_rank > best_stats[l-1].min_rank;
             }
 
-            outR->avg_rank = best_avg;
-            outR->min_value = best_minv;
+            if (replace) {
+                best_stats[l-1] = stats;
 
-            if(strlen(best_subsets) >= MAX_SUBSETS_STR) {
-                strncpy(outR->subsets, best_subsets, MAX_SUBSETS_STR - 1);
-                outR->subsets[MAX_SUBSETS_STR - 1] = '\0';
-            } else {
-                strcpy(outR->subsets, best_subsets);
-            }
+                // Bubble up
+                for (int i = l - 1; i > 0; i--) {
+                    int swap;
+                    if (strcmp(m, "avg") == 0) {
+                        swap = best_stats[i].avg_rank > best_stats[i-1].avg_rank;
+                    } else {
+                        swap = best_stats[i].min_rank > best_stats[i-1].min_rank;
+                    }
 
-            (*out_len)++;
-
-            if(!found) {
-                break;
-            } else {
-                current_offset = current_offset - draws_until_match;
+                    if (swap) {
+                        ComboStats tmp = best_stats[i];
+                        best_stats[i] = best_stats[i-1];
+                        best_stats[i-1] = tmp;
+                    } else break;
+                }
             }
         }
 
-        // Final check for out_len
-        if (*out_len > MAX_ALLOWED_OUT_LEN) {
-            fprintf(stderr, "Error: out_len=%d exceeds safety limit %d.\n", *out_len, MAX_ALLOWED_OUT_LEN);
-            free(results);
-            results = NULL;
-            *out_len = 0;
+        // Generate next combination
+        int pos = j - 1;
+        while (pos >= 0 && curr_combo[pos] == max_number - j + pos + 1) pos--;
+        if (pos < 0) break;
+
+        curr_combo[pos]++;
+        for (int i = pos + 1; i < j; i++) {
+            curr_combo[i] = curr_combo[pos] + (i - pos);
         }
-        return results;
+    } while (1);
+
+    // Fill results array
+    int results_count = 0;
+    for (int i = 0; i < filled && results_count < l; i++) {
+        AnalysisResultItem* item = &results[results_count++];
+
+        format_combo(best_stats[i].combo, best_stats[i].len, item->combination);
+        format_subsets(best_stats[i].combo, j, k, use_count, table, item->subsets);
+
+        item->avg_rank = best_stats[i].avg_rank;
+        item->min_value = best_stats[i].min_rank;
+        item->is_chain_result = 0;
     }
-    // NORMAL analysis
-    else {
-        int use_count = draws_count - last_offset;
-        if(use_count < 1) {
-            return NULL;
-        }
-        // sort ascending
-        for(int i=0; i<draws_count; i++){
-            for(int a=0; a<5; a++){
-                for(int b=a+1; b<6; b++){
-                    if(draws[i][a] > draws[i][b]){
-                        int tmp = draws[i][a];
-                        draws[i][a] = draws[i][b];
-                        draws[i][b] = tmp;
-                    }
-                }
-            }
-        }
 
-        SubsetOccDict* occ = create_subset_occdict(max_number, k);
+    // Handle "selected" results if requested
+    if (n > 0) {
+        for (int i = l; i < filled && results_count < l + n; i++) {
+            AnalysisResultItem* item = &results[results_count++];
 
-        // EXACT Python weighting: reversed
-        for(int idx = use_count - 1; idx >= 0; idx--){
-            long long weight = (use_count - 1) - idx;
-            update_subset_occdict(occ, draws[idx], 6, weight);
-        }
+           format_combo(best_stats[i].combo, best_stats[i].len, item->combination);
+           format_subsets(best_stats[i].combo, j, k, use_count, table, item->subsets);
 
-        long long total_combos = comb_ll(max_number, j);
-        if(total_combos <= 0) {
-            free_subset_occdict(occ);
-            return NULL;
-        }
+           item->avg_rank = best_stats[i].avg_rank;
+           item->min_value = best_stats[i].min_rank;
+           item->is_chain_result = 0;
+       }
+   }
 
-        // We'll store up to l combos
-        typedef struct {
-            int combo[64];
-            int combo_len;
-            double avg_occurrence;
-            double min_occurrence;
-            char subsets[512];
-        } ComboStats;
+   // Clean up
+   free(curr_combo);
+   free(best_stats);
+   free_subset_table(table);
 
-        ComboStats* best_array = (ComboStats*)calloc(l, sizeof(ComboStats));
-        int filled = 0;
+   if (results_count == 0) {
+       free(results);
+       return NULL;
+   }
 
-        int* comb_arr = (int*)malloc(sizeof(int)*j);
-        for(int i=0; i<j; i++){
-            comb_arr[i] = i+1;
-        }
-
-        do {
-            long long sum_occ = 0;
-            long long min_occ = LLONG_MAX;
-
-            // Build subsets
-            char big_subsets[512] = {0};
-            char big_temp[16384];
-            big_temp[0] = '\0';
-            strcat(big_temp, "[");
-
-            int ccomb[20];
-            for(int i=0; i<k; i++){
-                ccomb[i] = i;
-            }
-            int first_sub = 1;
-
-            while(1) {
-                int temp[20];
-                for(int x=0; x<k; x++){
-                    temp[x] = comb_arr[ccomb[x]];
-                }
-                int idx_s = subset_to_index(temp, k, max_number);
-                long long w = 0;
-                if(idx_s>=0 && idx_s<occ->max_subsets){
-                    w = occ->subset_weights[idx_s];
-                }
-                sum_occ += w;
-                if(w < min_occ) min_occ = w;
-
-                // add to big_temp
-                char subset_str[128];
-                subset_str[0] = '\0';
-                strcat(subset_str, "(");
-                for(int z=0; z<k; z++){
-                    char numbuf[32];
-                    snprintf(numbuf, sizeof(numbuf), "%d", temp[z]);
-                    strcat(subset_str, numbuf);
-                    if(z<k-1) strcat(subset_str, ", ");
-                }
-                strcat(subset_str, ")");
-
-                if(!first_sub) {
-                    strcat(big_temp, ", ");
-                } else {
-                    first_sub = 0;
-                }
-                char entry[256];
-                snprintf(entry, sizeof(entry), "(%s, %lld)", subset_str, w);
-                strcat(big_temp, entry);
-
-                int rpos = k - 1;
-                while(rpos>=0 && ccomb[rpos] == (rpos + (j - k))) rpos--;
-                if(rpos<0) break;
-                ccomb[rpos]++;
-                for(int xx=rpos+1; xx<k; xx++){
-                    ccomb[xx] = ccomb[xx-1]+1;
-                }
-            }
-            strcat(big_temp, "]");
-            strncpy(big_subsets, big_temp, 511);
-            big_subsets[511] = '\0';
-
-            double avg_occ = (double)sum_occ / (double)comb_ll(j, k);
-            double sort_field = 0.0;
-            if(strcmp(m,"avg") == 0) {
-                sort_field = avg_occ;
-            } else {
-                sort_field = (double)min_occ;
-            }
-
-            if(filled < l) {
-                ComboStats* slot = &best_array[filled];
-                memcpy(slot->combo, comb_arr, j*sizeof(int));
-                slot->combo_len = j;
-                slot->avg_occurrence = avg_occ;
-                slot->min_occurrence = min_occ;
-                strncpy(slot->subsets, big_subsets, 511);
-                slot->subsets[511] = '\0';
-                filled++;
-            } else {
-                // find smallest
-                double min_val = 1e18;
-                int min_idx = -1;
-                for(int i=0; i<l; i++){
-                    double sfield = (strcmp(m,"avg")==0)
-                                    ? best_array[i].avg_occurrence
-                                    : best_array[i].min_occurrence;
-                    if(sfield < min_val) {
-                        min_val = sfield;
-                        min_idx = i;
-                    }
-                }
-                if(sort_field > min_val && min_idx>=0) {
-                    ComboStats* slot = &best_array[min_idx];
-                    memcpy(slot->combo, comb_arr, j*sizeof(int));
-                    slot->combo_len = j;
-                    slot->avg_occurrence = avg_occ;
-                    slot->min_occurrence = min_occ;
-                    strncpy(slot->subsets, big_subsets, 511);
-                    slot->subsets[511] = '\0';
-                }
-            }
-
-        } while(next_combination(comb_arr, j, max_number));
-
-        free(comb_arr);
-        free_subset_occdict(occ);
-
-        // Sort best_array descending
-        for(int i=0; i<filled; i++){
-            for(int jx=i+1; jx<filled; jx++){
-                double i_field = (strcmp(m,"avg")==0)
-                                 ? best_array[i].avg_occurrence
-                                 : best_array[i].min_occurrence;
-                double j_field = (strcmp(m,"avg")==0)
-                                 ? best_array[jx].avg_occurrence
-                                 : best_array[jx].min_occurrence;
-                if(j_field > i_field) {
-                    ComboStats tmp = best_array[i];
-                    best_array[i] = best_array[jx];
-                    best_array[jx] = tmp;
-                }
-            }
-        }
-
-        // We produce up to l combos plus n combos
-        int final_len = filled + ((n > 0) ? filled : 0);
-
-        if (final_len > MAX_ALLOWED_OUT_LEN) {
-            fprintf(stderr, "Error: final_len=%d exceeds safety limit %d.\n", final_len, MAX_ALLOWED_OUT_LEN);
-            free(best_array);
-            return NULL;
-        }
-
-        results = (AnalysisResultItem*)calloc(final_len, sizeof(AnalysisResultItem));
-        *out_len = final_len;
-
-        // top combos
-        for(int i=0; i<filled; i++){
-            AnalysisResultItem* outR = &results[i];
-            outR->is_chain_result = 0;
-
-            // Build combo string
-            char combo_str[512] = {0};
-            combo_to_string(best_array[i].combo, best_array[i].combo_len, combo_str);
-            if(strlen(combo_str) >= MAX_COMBO_STR) {
-                strncpy(outR->combination, combo_str, MAX_COMBO_STR - 1);
-                outR->combination[MAX_COMBO_STR - 1] = '\0';
-            } else {
-                strcpy(outR->combination, combo_str);
-            }
-
-            outR->avg_rank = best_array[i].avg_occurrence;
-            outR->min_value = best_array[i].min_occurrence;
-
-            if(strlen(best_array[i].subsets) >= MAX_SUBSETS_STR) {
-                strncpy(outR->subsets, best_array[i].subsets, MAX_SUBSETS_STR - 1);
-                outR->subsets[MAX_SUBSETS_STR - 1] = '\0';
-            } else {
-                strcpy(outR->subsets, best_array[i].subsets);
-            }
-        }
-
-        // n "selected combos" (simple approach)
-        if(n > 0) {
-            int sel_count = 0;
-            for(int i=0; i<filled; i++){
-                if(sel_count >= n) break;
-                int idx_out = filled + sel_count;
-                AnalysisResultItem* outR = &results[idx_out];
-                outR->is_chain_result = 0;
-
-                char combo_str[512] = {0};
-                combo_to_string(best_array[i].combo, best_array[i].combo_len, combo_str);
-                if(strlen(combo_str) >= MAX_COMBO_STR) {
-                    strncpy(outR->combination, combo_str, MAX_COMBO_STR - 1);
-                    outR->combination[MAX_COMBO_STR - 1] = '\0';
-                } else {
-                    strcpy(outR->combination, combo_str);
-                }
-
-                outR->avg_rank = best_array[i].avg_occurrence;
-                outR->min_value = best_array[i].min_occurrence;
-
-                if(strlen(best_array[i].subsets) >= MAX_SUBSETS_STR) {
-                    strncpy(outR->subsets, best_array[i].subsets, MAX_SUBSETS_STR - 1);
-                    outR->subsets[MAX_SUBSETS_STR - 1] = '\0';
-                } else {
-                    strcpy(outR->subsets, best_array[i].subsets);
-                }
-
-                sel_count++;
-            }
-        }
-
-        free(best_array);
-        return results;
-    }
+   *out_len = results_count;
+   return results;
 }
 
-/*
- * Free the array returned by run_analysis_c().
- */
 void free_analysis_results(AnalysisResultItem* results) {
-    if (results) free(results);
+   free(results);
 }
