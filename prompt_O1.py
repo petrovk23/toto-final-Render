@@ -1,4 +1,4 @@
-files = ['Procfile','static/css/custom.css', 'static/js/main.js', 'templates/game_options.html', 'templates/combos.html', 'templates/index.html', 'templates/layout.html', 'templates/layout_no_sidebar.html', 'templates/results.html', 'analysis.py', 'app.py', 'database.py', 'init_database.py', 'config.py', 'requirements.txt']
+files = ['Procfile','static/css/custom.css', 'static/js/main.js', 'templates/game_options.html', 'templates/combos.html', 'templates/index.html', 'templates/layout.html', 'templates/layout_no_sidebar.html', 'templates/results.html', 'analysis.py', 'app.py', 'database.py', 'init_database.py', 'config.py', 'requirements.txt', 'C_engine/src/analysis_engine.c', 'C_engine/src/analysis_engine.h', ]
 
 # Open the file in write mode
 with open('prompt_O1.txt', 'w') as output_file:
