@@ -26,7 +26,6 @@
 <hr>
 
 <a href="{{ url_for('download_all_combos') }}" class="btn btn-info mb-2">Download All as CSV</a>
-
 {% endblock sidebar %}
 
 {% block content %}
@@ -51,7 +50,9 @@ function updateTotalCount(delta) {
 function navigate(o) {
     window.location.href = '{{ url_for("combos") }}?limit=' + limit + '&offset=' + o;
 }
-function goTop(){ navigate(0); }
+function goTop(){
+    navigate(0);
+}
 function pageUp() {
     let newOffset = offset - limit;
     if (newOffset < 0) newOffset = 0;
@@ -128,6 +129,7 @@ hot = new Handsontable(container, {
 
 let rowsToRemoveIDs = [];
 
+// Hook to track which rows are removed
 hot.addHook('beforeRemoveRow', (index, amount) => {
   rowsToRemoveIDs = [];
   for (let i = 0; i < amount; i++) {
@@ -138,6 +140,7 @@ hot.addHook('beforeRemoveRow', (index, amount) => {
   }
 });
 
+// After row removal, call the server to actually delete
 hot.addHook('afterRemoveRow', (index, amount, source) => {
   if (rowsToRemoveIDs.length > 0) {
     const formData = new URLSearchParams();
@@ -161,6 +164,7 @@ hot.addHook('afterRemoveRow', (index, amount, source) => {
   }
 });
 
+// After row creation, call the server to insert
 hot.addHook('afterCreateRow', (index, amount, source) => {
   let after_id = null;
   if (index > 0) {
@@ -178,11 +182,17 @@ hot.addHook('afterCreateRow', (index, amount, source) => {
       alert("Invalid combo insert");
     } else {
       updateTotalCount(1);
+
+      // IMPORTANT: we replicate the original logic so that after adding a row,
+      // we jump to the new bottom page so the user sees it:
+      offset = total_count - limit;
+      if (offset < 0) offset = 0;
       loadData();
     }
   });
 });
 
+// After row move, reorder
 hot.addHook('afterRowMove', (movedRows, finalIndex, dropIndex, movePossible, orderChanged) => {
   if (!orderChanged) return;
   const allData = hot.getData();
@@ -203,6 +213,7 @@ hot.addHook('afterRowMove', (movedRows, finalIndex, dropIndex, movePossible, ord
   });
 });
 
+// After a cell changes, update on server
 hot.addHook('afterChange', (changes, source) => {
   if (!changes || loading) return;
   if (source === 'loadData') return;
@@ -247,7 +258,4 @@ hot.addHook('afterChange', (changes, source) => {
 
 loadData();
 </script>
-
-{# Removed the "Back to Options" button from here. The link is now in the top ribbon. #}
-
 {% endblock content %}

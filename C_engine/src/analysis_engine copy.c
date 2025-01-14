@@ -114,9 +114,7 @@ static SubsetTable* create_subset_table(size_t capacity) {
     table->capacity = capacity;
     table->size = 0;
 
-    for (size_t i = 0; i < capacity; i++) {
-        table->entries[i].last_seen = UINT32_MAX;
-    }
+    memset(table->entries, 0, capacity * sizeof(SubsetEntry));
     return table;
 }
 
@@ -130,53 +128,52 @@ static void free_subset_table(SubsetTable* table) {
 
 // SIMD-optimized subset lookup
 static inline uint32_t lookup_subset(const SubsetTable* table, __m256i pattern) {
-    uint32_t idx = _mm256_extract_epi32(_mm256_xor_si256(pattern,
+    uint32_t hash = _mm256_extract_epi32(_mm256_xor_si256(pattern,
         _mm256_srli_epi32(pattern, 13)), 0) & (table->capacity - 1);
 
     while (1) {
-        if (table->entries[idx].last_seen == UINT32_MAX) return UINT32_MAX;
-        if (_mm256_testc_si256(pattern, table->entries[idx].pattern)) {
-            return table->entries[idx].last_seen;
+        __m256i stored = table->entries[hash].pattern;
+        if (_mm256_testc_si256(pattern, stored)) {
+            return table->entries[hash].last_seen;
         }
-        idx = (idx + 1) & (table->capacity - 1);
+        if (table->entries[hash].last_seen == UINT32_MAX) {
+            return UINT32_MAX;
+        }
+        hash = (hash + 1) & (table->capacity - 1);
     }
 }
 
 // Process draw and update subset table
 static void process_draw(const int* draw, int draw_idx, int k,
                         SubsetTable* table) {
-    int indices[6];
-    for (int i = 0; i < k; i++) indices[i] = i;
+    int indices[6] = {0, 1, 2, 3, 4, 5};
+    int pos = k - 1;
 
     do {
-        int subset[6];
-        for (int i = 0; i < k; i++) {
-            subset[i] = draw[indices[i]];
-        }
+        __m256i pattern = numbers_to_pattern_simd(draw, k);
 
-        __m256i pattern = numbers_to_pattern_simd(subset, k);
-        uint32_t idx = _mm256_extract_epi32(_mm256_xor_si256(pattern,
+        uint32_t hash = _mm256_extract_epi32(_mm256_xor_si256(pattern,
             _mm256_srli_epi32(pattern, 13)), 0) & (table->capacity - 1);
 
         while (1) {
-            if (table->entries[idx].last_seen == UINT32_MAX ||
-                _mm256_testc_si256(pattern, table->entries[idx].pattern)) {
-                table->entries[idx].pattern = pattern;
-                table->entries[idx].last_seen = draw_idx;
+            if (table->entries[hash].last_seen == UINT32_MAX ||
+                _mm256_testc_si256(pattern, table->entries[hash].pattern)) {
+                table->entries[hash].pattern = pattern;
+                table->entries[hash].last_seen = draw_idx;
                 break;
             }
-            idx = (idx + 1) & (table->capacity - 1);
+            hash = (hash + 1) & (table->capacity - 1);
         }
 
-        // Next k-combination
-        int i = k - 1;
-        while (i >= 0 && indices[i] == 6 - k + i) i--;
-        if (i < 0) break;
+        // Next combination
+        while (pos >= 0 && indices[pos] >= 6 - k + pos) pos--;
+        if (pos < 0) break;
 
-        indices[i]++;
-        for (int j = i + 1; j < k; j++) {
-            indices[j] = indices[i] + (j - i);
+        indices[pos]++;
+        for (int i = pos + 1; i < k; i++) {
+            indices[i] = indices[i-1] + 1;
         }
+        pos = k - 1;
     } while (1);
 }
 
@@ -185,28 +182,24 @@ static void evaluate_combo(const int* combo, int j, int k, int draws_count,
                          const SubsetTable* table, double* avg_rank,
                          double* min_rank) {
     __m256d sum = _mm256_setzero_pd();
-    double min_val = draws_count;
+    __m256d minv = _mm256_set1_pd(draws_count);
     int count = 0;
 
-    int indices[MAX_NUMBERS];
+    int indices[8] = {0};  // k is typically small
     for (int i = 0; i < k; i++) indices[i] = i;
 
     do {
-        int subset[MAX_NUMBERS];
-        for (int i = 0; i < k; i++) {
-            subset[i] = combo[indices[i]];
-        }
-        __m256i pattern = numbers_to_pattern_simd(subset, k);
+        __m256i pattern = numbers_to_pattern_simd(combo, k);
         uint32_t last_seen = lookup_subset(table, pattern);
 
         double rank = (last_seen != UINT32_MAX) ?
                      (double)(draws_count - last_seen - 1) : draws_count;
 
         sum = _mm256_add_pd(sum, _mm256_set1_pd(rank));
-        min_val = fmin(min_val, rank);
+        minv = _mm256_min_pd(minv, _mm256_set1_pd(rank));
         count++;
 
-        // Next k-combination
+        // Next k-subset
         int i = k - 1;
         while (i >= 0 && indices[i] == j - k + i) i--;
         if (i < 0) break;
@@ -217,153 +210,107 @@ static void evaluate_combo(const int* combo, int j, int k, int draws_count,
         }
     } while (1);
 
-    double sum_arr[4];
+    double sum_arr[4], min_arr[4];
     _mm256_store_pd(sum_arr, sum);
+    _mm256_store_pd(min_arr, minv);
+
     *avg_rank = sum_arr[0] / count;
-    *min_rank = min_val;
+    *min_rank = min_arr[0];
 }
 
-// Process chain combination without parallelism
-static void process_chain_combination(int j, int k, int max_number,
-                                    const SubsetTable* table, int draws_count,
-                                    const char* mode, AnalysisResultItem* result) {
-    ComboStats best;
-    best.avg_rank = -1;
-    best.min_rank = -1;
-    best.length = 0;
-
-    int combo[MAX_NUMBERS];
-
-    void generate_rest(int pos) {
-        if (pos == j) {
-            double avg_rank, min_rank;
-            evaluate_combo(combo, j, k, draws_count, table, &avg_rank, &min_rank);
-
-            double compare_val = strcmp(mode, "avg") == 0 ? avg_rank : min_rank;
-            double best_val = strcmp(mode, "avg") == 0 ? best.avg_rank : best.min_rank;
-
-            if (best.length == 0 || compare_val > best_val) {
-                memcpy(best.combo, combo, j * sizeof(int));
-                best.pattern = numbers_to_pattern_simd(combo, j);
-                best.avg_rank = avg_rank;
-                best.min_rank = min_rank;
-                best.length = j;
-            }
-            return;
-        }
-
-        for (int i = (pos == 0) ? 1 : combo[pos-1] + 1; i <= max_number - (j-pos); i++) {
-            combo[pos] = i;
-            generate_rest(pos + 1);
-        }
-    }
-
-    generate_rest(0);
-
-    if (best.length > 0) {
-        char* ptr = result->combination;
-        for (int x = 0; x < best.length; x++) {
-            if (x > 0) *ptr++ = ',';
-            ptr += sprintf(ptr, "%d", best.combo[x]);
-        }
-        *ptr = '\0';
-
-        result->avg_rank = best.avg_rank;
-        result->min_value = best.min_rank;
-    }
-}
-
-// Process combinations in parallel for normal analysis
+// Process combinations in parallel with SIMD
 static void process_combinations(int j, int k, int max_number,
                                const SubsetTable* table, int draws_count,
                                const char* mode, AnalysisResultItem* results,
-                               int want_count, int* out_count) {
+                               int limit, int* out_count) {
+    const int block_size = 1024;
     *out_count = 0;
 
     #pragma omp parallel
     {
-        ComboStats* local_best = (ComboStats*)_mm_malloc(want_count * sizeof(ComboStats), 32);
+        ComboStats* local_best = (ComboStats*)_mm_malloc(
+            limit * sizeof(ComboStats), 32);
         int local_count = 0;
 
-        if (local_best) {
-            #pragma omp for schedule(dynamic, 1000)
-            for (int first = 1; first <= max_number - j + 1; first++) {
-                int combo[MAX_NUMBERS];
-                combo[0] = first;
+        #pragma omp for schedule(dynamic, block_size)
+        for (int first = 1; first <= max_number - j + 1; first++) {
+            int combo[MAX_NUMBERS];
+            combo[0] = first;
 
-                void generate_rest(int pos) {
-                    if (pos == j) {
-                        double avg_rank, min_rank;
-                        evaluate_combo(combo, j, k, draws_count, table,
-                                    &avg_rank, &min_rank);
+            void generate_rest(int pos) {
+                if (pos == j) {
+                    double avg_rank, min_rank;
+                    evaluate_combo(combo, j, k, draws_count, table,
+                                 &avg_rank, &min_rank);
 
-                        if (local_count < want_count) {
-                            ComboStats* stat = &local_best[local_count++];
+                    if (local_count < limit) {
+                        ComboStats* stat = &local_best[local_count++];
+                        memcpy(stat->combo, combo, j * sizeof(int));
+                        stat->pattern = numbers_to_pattern_simd(combo, j);
+                        stat->avg_rank = avg_rank;
+                        stat->min_rank = min_rank;
+                        stat->length = j;
+                    } else {
+                        // Replace worst if better
+                        int worst_idx = 0;
+                        double worst_val = strcmp(mode, "avg") == 0 ?
+                            local_best[0].avg_rank : local_best[0].min_rank;
+
+                        for (int i = 1; i < limit; i++) {
+                            double val = strcmp(mode, "avg") == 0 ?
+                                local_best[i].avg_rank : local_best[i].min_rank;
+                            if (val < worst_val) {
+                                worst_val = val;
+                                worst_idx = i;
+                            }
+                        }
+
+                        double compare_val = strcmp(mode, "avg") == 0 ?
+                            avg_rank : min_rank;
+
+                        if (compare_val > worst_val) {
+                            ComboStats* stat = &local_best[worst_idx];
                             memcpy(stat->combo, combo, j * sizeof(int));
                             stat->pattern = numbers_to_pattern_simd(combo, j);
                             stat->avg_rank = avg_rank;
                             stat->min_rank = min_rank;
                             stat->length = j;
-                        } else {
-                            int worst_idx = 0;
-                            double worst_val = strcmp(mode, "avg") == 0 ?
-                                local_best[0].avg_rank : local_best[0].min_rank;
-
-                            for (int i = 1; i < want_count; i++) {
-                                double val = strcmp(mode, "avg") == 0 ?
-                                    local_best[i].avg_rank : local_best[i].min_rank;
-                                if (val < worst_val) {
-                                    worst_val = val;
-                                    worst_idx = i;
-                                }
-                            }
-
-                            double compare_val = strcmp(mode, "avg") == 0 ?
-                                avg_rank : min_rank;
-
-                            if (compare_val > worst_val) {
-                                ComboStats* stat = &local_best[worst_idx];
-                                memcpy(stat->combo, combo, j * sizeof(int));
-                                stat->pattern = numbers_to_pattern_simd(combo, j);
-                                stat->avg_rank = avg_rank;
-                                stat->min_rank = min_rank;
-                                stat->length = j;
-                            }
                         }
-                        return;
                     }
-
-                    for (int i = combo[pos-1] + 1; i <= max_number - (j-pos); i++) {
-                        combo[pos] = i;
-                        generate_rest(pos + 1);
-                    }
+                    return;
                 }
 
-                generate_rest(1);
-            }
-
-            #pragma omp critical
-            {
-                for (int i = 0; i < local_count && *out_count < want_count; i++) {
-                    ComboStats* stat = &local_best[i];
-                    AnalysisResultItem* item = &results[*out_count];
-
-                    char* ptr = item->combination;
-                    for (int x = 0; x < stat->length; x++) {
-                        if (x > 0) *ptr++ = ',';
-                        ptr += sprintf(ptr, "%d", stat->combo[x]);
-                    }
-                    *ptr = '\0';
-
-                    item->avg_rank = stat->avg_rank;
-                    item->min_value = stat->min_rank;
-                    item->is_chain_result = 0;
-                    (*out_count)++;
+                for (int i = combo[pos-1] + 1; i <= max_number - (j-pos); i++) {
+                    combo[pos] = i;
+                    generate_rest(pos + 1);
                 }
             }
 
-            _mm_free(local_best);
+            generate_rest(1);
         }
+
+        // Merge results
+        #pragma omp critical
+        {
+            for (int i = 0; i < local_count && *out_count < limit; i++) {
+                ComboStats* stat = &local_best[i];
+                AnalysisResultItem* item = &results[*out_count];
+
+                char* ptr = item->combination;
+                for (int x = 0; x < stat->length; x++) {
+                    if (x > 0) *ptr++ = ',';
+                    ptr += sprintf(ptr, "%d", stat->combo[x]);
+                }
+                *ptr = '\0';
+
+                item->avg_rank = stat->avg_rank;
+                item->min_value = stat->min_rank;
+                item->is_chain_result = 0;
+                (*out_count)++;
+            }
+        }
+
+        _mm_free(local_best);
     }
 }
 
@@ -382,7 +329,7 @@ AnalysisResultItem* run_analysis_c(
 ) {
     *out_len = 0;
     init_tables();
-    
+
     int max_number = strstr(game_type, "6_49") ? 49 : 42;
 
     if (last_offset < 0) last_offset = 0;
@@ -413,25 +360,28 @@ AnalysisResultItem* run_analysis_c(
     memset(results, 0, capacity * sizeof(AnalysisResultItem));
 
     if (l == -1) {
-        // Chain analysis - use non-parallel combination processing
+        // Chain analysis
         int chain_count = 0;
         int current_offset = last_offset;
 
         while (current_offset < draws_count && chain_count < capacity) {
-            process_chain_combination(j, k, max_number, table,
-                                   draws_count - current_offset,
-                                   m, &results[chain_count]);
+            // Find best combo at current offset
+            int local_count = 0;
+            process_combinations(j, k, max_number, table,
+                              draws_count - current_offset,
+                              m, &results[chain_count], 1, &local_count);
 
-            if (results[chain_count].avg_rank < 0) break;
+            if (local_count == 0) break;
 
             results[chain_count].is_chain_result = 1;
             results[chain_count].draw_offset = current_offset;
             results[chain_count].analysis_start_draw = draws_count - current_offset;
 
-            // Find next match using SIMD operations
+            // Find next match
             int next_combo[MAX_NUMBERS];
             const char* p = results[chain_count].combination;
             int num_count = 0;
+
             while (*p && num_count < j) {
                 next_combo[num_count++] = atoi(p);
                 while (*p && *p != ',') p++;
@@ -441,29 +391,32 @@ AnalysisResultItem* run_analysis_c(
             int match_found = 0;
             int match_draws = draws_count - current_offset;
 
-            #pragma omp parallel for schedule(dynamic, 64) shared(match_found, match_draws)
-            for (int i = 1; i < draws_count - current_offset; i++) {
-                if (!match_found) {
-                    __m256i draw_pattern = numbers_to_pattern_simd(draws[i], 6);
+            for (int i = 1; i < draws_count - current_offset && !match_found; i++) {
+                __m256i draw_pattern = numbers_to_pattern_simd(draws[i], 6);
 
-                    for (int x1 = 0; x1 < j-k+1 && !match_found; x1++) {
-                        int subset[MAX_NUMBERS];
-                        for (int s = 0; s < k; s++) {
-                            subset[s] = next_combo[x1 + s];
-                        }
-                        __m256i subset_pattern = numbers_to_pattern_simd(subset, k);
+                int indices[MAX_NUMBERS];
+                for (int x1 = 0; x1 < k; x1++) indices[x1] = x1;
 
-                        if (_mm256_testc_si256(subset_pattern, draw_pattern)) {
-                            #pragma omp critical
-                            {
-                                if (!match_found || i < match_draws) {
-                                    match_found = 1;
-                                    match_draws = i;
-                                }
-                            }
-                        }
+                do {
+                    __m256i subset = numbers_to_pattern_simd(&next_combo[indices[0]], k);
+
+                    if (_mm256_testc_si256(subset, draw_pattern)) {
+                        match_found = 1;
+                        match_draws = i;
+                        break;
                     }
-                }
+
+                    // Next k-combination
+                    int p = k - 1;
+                    while (p >= 0 && indices[p] == j - k + p) p--;
+                    if (p < 0) break;
+                    indices[p]++;
+                    for (int x = p + 1; x < k; x++) {
+                        indices[x] = indices[p] + (x - p);
+                    }
+                } while (1);
+
+                if (match_found) break;
             }
 
             results[chain_count].draws_until_common = match_draws;
@@ -478,6 +431,7 @@ AnalysisResultItem* run_analysis_c(
         }
 
         *out_len = chain_count;
+
     } else {
         // Normal analysis
         process_combinations(j, k, max_number, table, use_count,
