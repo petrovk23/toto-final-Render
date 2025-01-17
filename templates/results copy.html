@@ -9,12 +9,15 @@
 </div>
 {% endif %}
 
-<!-- We replace the old progress bar with a simple "Processing..." spinner/message. -->
-<div id="analysis-processing" style="display: none;" class="mt-2">
+<div id="analysis-progress-container" style="display: none;" class="mt-2">
     <div class="d-flex align-items-center">
-        <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
-        <small>Processing...</small>
+        <div class="spinner-border spinner-border-sm text-primary me-2" role="status" id="analysis-spinner"></div>
+        <small id="analysis-status-text">Processing...</small>
     </div>
+    <div class="progress mt-2" style="height: 4px;">
+        <div class="progress-bar" role="progressbar" style="width: 0%;" aria-valuemin="0" aria-valuemax="100" id="analysis-progress-bar"></div>
+    </div>
+    <small class="text-muted" id="analysis-progress-detail"></small>
 </div>
 
 <hr class="my-2">
@@ -31,7 +34,7 @@
                 <th style="width: 100px;">Analysis #</th>
                 <th style="width: 100px;">For Draw</th>
                 {% endif %}
-                <th style="width: 300px;">Combination</th>
+                <th style="width: 180px;">Combination</th>
                 <th style="width: 100px;">Avg Rank</th>
                 <th style="width: 100px;">Min Rank</th>
                 {% if l == -1 %}
@@ -69,7 +72,7 @@
     <table class="table table-sm table-striped table-hover">
         <thead>
             <tr>
-                <th style="width: 300px;">Combination</th>
+                <th style="width: 180px;">Combination</th>
                 <th style="width: 100px;">Avg Rank</th>
                 <th style="width: 100px;">Min Rank</th>
                 <th>Subsets <small class="text-muted">(click to expand)</small></th>
@@ -121,7 +124,10 @@
 <script>
 document.addEventListener('DOMContentLoaded', function() {
     const runBtn = document.getElementById('run-analysis-btn');
-    const processingContainer = document.getElementById('analysis-processing');
+    const progressContainer = document.getElementById('analysis-progress-container');
+    const progressBar = document.getElementById('analysis-progress-bar');
+    const statusText = document.getElementById('analysis-status-text');
+    const progressDetail = document.getElementById('analysis-progress-detail');
     const resultsContainer = document.getElementById('results-container');
 
     let pollInterval = null;
@@ -142,7 +148,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function startAnalysis() {
         resultsContainer.style.display = 'none';
-        processingContainer.style.display = 'block';
+        progressContainer.style.display = 'block';
+        progressBar.style.width = '0%';
+        progressDetail.textContent = '';
+        statusText.textContent = 'Processing...';
 
         fetch('/analysis_run', {
             method: 'POST',
@@ -151,14 +160,14 @@ document.addEventListener('DOMContentLoaded', function() {
         .then(resp => {
             if (!resp.ok) throw new Error('Failed to start analysis');
             if (pollInterval) clearInterval(pollInterval);
-            pollInterval = setInterval(checkDone, 1000);
+            pollInterval = setInterval(checkProgress, 1000);
         })
         .catch(err => {
             alert("Failed to start analysis: " + err.message);
         });
     }
 
-    function checkDone() {
+    function checkProgress() {
         fetch('/analysis_progress')
         .then(resp => {
             if (!resp.ok) throw new Error('Error fetching progress');
@@ -168,14 +177,23 @@ document.addEventListener('DOMContentLoaded', function() {
             if (!data.in_progress && data.done) {
                 clearInterval(pollInterval);
                 pollInterval = null;
+                statusText.textContent = 'Done!';
+                progressBar.style.width = '100%';
+                progressDetail.textContent = `Elapsed time: ${data.elapsed} seconds.`;
+
                 const url = new URL('/analysis', window.location.href);
                 const params = createParams();
                 params.forEach((value, key) => url.searchParams.set(key, value));
                 window.location.href = url.toString();
+            } else {
+                const p = data.processed;
+                const t = data.total;
+                let pct = (t > 0) ? Math.floor((p / t) * 100) : 0;
+                progressBar.style.width = pct + '%';
             }
         })
         .catch(err => {
-            console.error("Check-done error:", err);
+            console.error("Progress check error:", err);
             clearInterval(pollInterval);
         });
     }
@@ -203,6 +221,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 </script>
+
 {% endblock content %}
 
 {% block sidebar %}

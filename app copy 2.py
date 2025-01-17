@@ -7,15 +7,21 @@ This is the Flask application entry point. It handles:
 - Routing for pages (index, select_game, combos, analysis, etc.)
 - Database I/O for combos
 - The analysis run invocation
-- A simple "processing" status while analysis runs (replacing the previous progress bar)
-- The ability to cancel any ongoing analysis if a new one starts.
+- The progress endpoint (although we no longer do partial progress from C)
 
-Key changes to support the new functionality:
-- In /analysis_run, if an analysis is already in progress, we cancel (join) the existing
-  thread before starting a new one. This way, the user doesn't need to wait for the
-  previous one to finish if they made a mistake and want to run again.
-- The progress bar has been replaced with a simple "Processing..." spinner/message in
-  templates/results.html, and we do not display partial progress.
+Key changes compared to the original (Python-based) analysis approach:
+- We import 'run_analysis' from the new analysis.py, which calls the C library.
+- For partial-progress updates, we no longer do them, but we keep the endpoints
+  so your UI remains functional (the progress just jumps from 0% to done).
+
+We have ensured that the route "combos" logic is the same as the original:
+- If "offset" is missing, jump to the last page automatically.
+Otherwise, we respect the offset. This ensures you can "see the combos."
+
+The 'analysis_run' route spawns a thread that calls run_analysis(...).
+We store the results in global variables 'analysis_selected_df' and
+'analysis_top_df' to be displayed by the /analysis route. This matches
+the original structure so your UI doesn't break.
 """
 
 import os
@@ -38,6 +44,8 @@ app.config['SESSION_PERMANENT'] = False
 Session(app)
 
 analysis_in_progress = False
+analysis_processed = 0
+analysis_total = 0
 analysis_selected_df = None
 analysis_top_df = None
 analysis_elapsed = None
@@ -260,8 +268,8 @@ def analysis_route():
 @app.route('/analysis_run', methods=['POST'])
 def analysis_run():
     """
-    Starts the analysis in a separate thread. If an existing analysis is in progress,
-    we cancel (join) it first, so the user doesn't have to wait for a mistake run to finish.
+    Starts the analysis in a separate thread so we can poll for progress (though
+    we do not get partial updates from the C code, so the progress just goes 0 -> done).
     """
     global analysis_in_progress, analysis_processed, analysis_total
     global analysis_selected_df, analysis_top_df, analysis_elapsed
@@ -275,7 +283,7 @@ def analysis_run():
     n_val = request.form.get('n', type=int, default=0)
     offset_val = request.form.get('offset_last', type=int, default=0)
 
-    # If there's an existing analysis, cancel it and wait for its thread to finish.
+    # If there's an existing analysis, cancel it
     if analysis_in_progress:
         analysis_cancel_requested = True
         if analysis_thread and analysis_thread.is_alive():
@@ -284,29 +292,23 @@ def analysis_run():
         analysis_in_progress = False
 
     analysis_in_progress = True
+    analysis_processed = 0
+    analysis_total = 0
     analysis_selected_df = None
     analysis_top_df = None
     analysis_elapsed = None
 
     def worker():
         global analysis_in_progress, analysis_selected_df, analysis_top_df, analysis_elapsed
-        print("Analysis starting...")
-        try:
-            sel_df, top_df, elapsed = run_analysis(
-                game_type=game_type,
-                j=j, k=k, m=m, l=l, n=n_val,
-                last_offset=offset_val
-            )
-            print(f"Analysis completed in {elapsed} seconds")
-            analysis_selected_df = sel_df
-            analysis_top_df = top_df
-            analysis_elapsed = elapsed
-            analysis_in_progress = False
-            print("Worker thread finished, in_progress=False")
-        except Exception as e:
-            print(f"Error in analysis: {str(e)}")
-            analysis_in_progress = False
-            raise
+        sel_df, top_df, elapsed = run_analysis(
+            game_type=game_type,
+            j=j, k=k, m=m, l=l, n=n_val,
+            last_offset=offset_val
+        )
+        analysis_selected_df = sel_df
+        analysis_top_df = top_df
+        analysis_elapsed = elapsed
+        analysis_in_progress = False
 
     analysis_thread = threading.Thread(target=worker)
     analysis_thread.start()
@@ -315,15 +317,22 @@ def analysis_run():
 @app.route('/analysis_progress', methods=['GET'])
 def analysis_progress():
     """
-    Simple endpoint to check if analysis is done
+    Our UI polls this endpoint for progress. We do not have partial updates from C,
+    so we simply return 'done' or not. Once the C code finishes, 'done' is true.
     """
-    global analysis_in_progress, analysis_elapsed
+    global analysis_in_progress, analysis_processed, analysis_total, analysis_elapsed
     resp = {
         'in_progress': analysis_in_progress,
+        'processed': analysis_processed,
+        'total': analysis_total,
         'done': (not analysis_in_progress) and (analysis_elapsed is not None),
         'elapsed': analysis_elapsed
     }
     return jsonify(resp)
+
+################################################################################
+# ADD THESE TWO MISSING ROUTES BELOW TO MATCH THE ORIGINAL FUNCTIONALITY
+################################################################################
 
 @app.route('/download_top_csv', methods=['GET'])
 def download_top_csv():

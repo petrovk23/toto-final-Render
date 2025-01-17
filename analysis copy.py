@@ -92,7 +92,9 @@ analysis_lib.free_analysis_results.restype = None
 # 5) The main function called by app.py to run the analysis
 # ------------------------------------------------------------------------------
 def run_analysis(game_type='6_42', j=6, k=3, m='min', l=1, n=0,
-                 last_offset=0):
+                 last_offset=0,
+                 progress_callback=None,
+                 should_stop=lambda: False):
     """
     This function replicates your Python "analysis" logic but uses the C engine
     for all heavy computations.

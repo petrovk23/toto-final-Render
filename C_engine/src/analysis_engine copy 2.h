@@ -18,7 +18,7 @@ typedef struct {
     char subsets[512];
 
     // For chain analysis:
-    //   draw_offset: "Analysis #"
+    //   draw_offset:    "Analysis #"
     //   draws_until_common: "Top-Ranked Duration"
     //   analysis_start_draw: "For Draw" ( = total_draws - offset )
     //   is_chain_result: 1 if from chain analysis
@@ -33,13 +33,13 @@ typedef struct {
  * -------------------
  * Main entry point for both standard (l >= 1) and chain (l == -1) analyses.
  *
- * If l != -1, returns up to l + n combos (the top-l plus optional “selected” combos),
- * but the “selected” combos are now chosen to avoid overlapping *k*-subsets with each other.
+ * If l != -1, returns up to l + n combos (the top-l plus optional “selected” combos).
  *
  * If l == -1, runs the “chain” of repeated top-1 analyses:
  *   - Each iteration uses the current offset.
  *   - After each top-1 result, searches forward draws for a common k-subset.
- *     If never found, we imagine a future draw to finalize “Top-Ranked Duration.”
+ *     If found, offset decreases by how many forward draws we needed to check.
+ *     If not found, we treat it as if we found one imaginary draw forward of the last row.
  *
  * Caller must free the returned pointer with free_analysis_results(...).
  *
