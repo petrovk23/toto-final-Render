@@ -1387,7 +1387,6 @@ def download_selected_csv():
     response.headers["Content-type"] = "text/csv"
     return response
 
-
 if __name__ == '__main__':
     # Typically run with "python app.py" or "gunicorn app:app"
     port = int(os.environ.get("PORT", 10000))
@@ -2561,4 +2560,4 @@ void free_analysis_results(AnalysisResultItem* results);
 
 </current_code>
 
-
+This is my codebase. When I run the analysis or chain of analysis some of the k-number subsets of the resulted combos are missing in the Subsets column. All possible k-subset per resulted combo should be displayed in the Subsets column. Solve that problem. Make the necessary changes. Generate the complete changed files - NO OTHER FILES.

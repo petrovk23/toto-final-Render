@@ -1,30 +1,13 @@
-# app.py
-"""
-app.py
-------
-This is the Flask application entry point. It handles:
-- Session setup
-- Routing for pages (index, select_game, combos, analysis, etc.)
-- Database I/O for combos
-- The analysis run invocation
-- A simple "processing" status while analysis runs (replacing the previous progress bar)
-- The ability to cancel any ongoing analysis if a new one starts.
-
-Key changes to support the new functionality:
-- In /analysis_run, if an analysis is already in progress, we cancel (join) the existing
-  thread before starting a new one. This way, the user doesn't need to wait for the
-  previous one to finish if they made a mistake and want to run again.
-- The progress bar has been replaced with a simple "Processing..." spinner/message in
-  templates/results.html, and we do not display partial progress.
-"""
-
 import os
 import io
 import pandas as pd
 import threading
 import time
+import psutil
+import ctypes
 
-from flask import Flask, render_template, request, make_response, jsonify, redirect, url_for, session
+from flask import Flask, render_template, request, make_response, jsonify, redirect
+from flask import url_for, session, Response
 from flask_session import Session
 
 from database import *
@@ -37,12 +20,18 @@ app.config['SESSION_TYPE'] = 'filesystem'
 app.config['SESSION_PERMANENT'] = False
 Session(app)
 
+CHUNK_SIZE = 1000
+
 analysis_in_progress = False
 analysis_selected_df = None
 analysis_top_df = None
 analysis_elapsed = None
 analysis_thread = None
 analysis_cancel_requested = False
+
+def get_memory_usage():
+    process = psutil.Process()
+    return process.memory_info().rss / 1024 / 1024  # MB
 
 @app.context_processor
 def utility_processor():
@@ -106,7 +95,16 @@ def combos_data():
     game_type = session.get('game_type', '6_42')
     limit = request.args.get('limit', 20, type=int)
     offset = request.args.get('offset', 0, type=int)
-    draws = get_draws(game_type, limit=limit, offset=offset)
+    draws = []
+
+    # Chunked loading of draws
+    for chunk_offset in range(offset, offset + limit, CHUNK_SIZE):
+        chunk_limit = min(CHUNK_SIZE, offset + limit - chunk_offset)
+        chunk = get_draws_chunk(game_type, chunk_limit, chunk_offset)
+        draws.extend(chunk)
+        if len(chunk) < chunk_limit:
+            break
+
     data = []
     for d in draws:
         data.append([
@@ -184,28 +182,44 @@ def move_row_hot():
 @app.route('/download_all_combos', methods=['GET'])
 def download_all_combos():
     """
-    Let users download all combos as CSV.
+    Let users download all combos as CSV with chunked streaming.
     """
     game_type = session.get('game_type', '6_42')
-    rows = get_all_draws(game_type)
-    df = pd.DataFrame([
-        [
-            row['draw_number'],
-            row['number1'],
-            row['number2'],
-            row['number3'],
-            row['number4'],
-            row['number5'],
-            row['number6']
-        ]
-        for row in rows
-    ], columns=['Draw', '#1', '#2', '#3', '#4', '#5', '#6'])
-    output = io.StringIO()
-    df.to_csv(output, index=False)
-    output.seek(0)
-    response = make_response(output.getvalue())
+
+    def generate():
+        # Write header
+        yield 'Draw,#1,#2,#3,#4,#5,#6\n'.encode('utf-8')
+
+        # Stream data in chunks
+        offset = 0
+        while True:
+            chunk = get_draws_chunk(game_type, CHUNK_SIZE, offset)
+            if not chunk:
+                break
+
+            chunk_data = []
+            for row in chunk:
+                chunk_data.append([
+                    row['draw_number'],
+                    row['number1'],
+                    row['number2'],
+                    row['number3'],
+                    row['number4'],
+                    row['number5'],
+                    row['number6']
+                ])
+
+            if chunk_data:
+                df_chunk = pd.DataFrame(chunk_data,
+                    columns=['Draw', '#1', '#2', '#3', '#4', '#5', '#6'])
+                yield df_chunk.to_csv(index=False, header=False).encode('utf-8')
+
+            offset += CHUNK_SIZE
+            if len(chunk) < CHUNK_SIZE:
+                break
+
+    response = Response(generate(), mimetype='text/csv')
     response.headers["Content-Disposition"] = "attachment; filename=all_combos.csv"
-    response.headers["Content-type"] = "text/csv"
     return response
 
 @app.route('/analysis_start', methods=['GET'])
@@ -261,7 +275,7 @@ def analysis_route():
 def analysis_run():
     """
     Starts the analysis in a separate thread. If an existing analysis is in progress,
-    we cancel (join) it first, so the user doesn't have to wait for a mistake run to finish.
+    we cancel (join) it first.
     """
     global analysis_in_progress, analysis_processed, analysis_total
     global analysis_selected_df, analysis_top_df, analysis_elapsed
@@ -275,7 +289,6 @@ def analysis_run():
     n_val = request.form.get('n', type=int, default=0)
     offset_val = request.form.get('offset_last', type=int, default=0)
 
-    # If there's an existing analysis, cancel it and wait for its thread to finish.
     if analysis_in_progress:
         analysis_cancel_requested = True
         if analysis_thread and analysis_thread.is_alive():
@@ -315,51 +328,61 @@ def analysis_run():
 @app.route('/analysis_progress', methods=['GET'])
 def analysis_progress():
     """
-    Simple endpoint to check if analysis is done
+    Simple endpoint to check if analysis is done, with memory usage info
     """
     global analysis_in_progress, analysis_elapsed
     resp = {
         'in_progress': analysis_in_progress,
         'done': (not analysis_in_progress) and (analysis_elapsed is not None),
-        'elapsed': analysis_elapsed
+        'elapsed': analysis_elapsed,
+        'memory_mb': get_memory_usage()
     }
     return jsonify(resp)
 
 @app.route('/download_top_csv', methods=['GET'])
 def download_top_csv():
     """
-    Let users download the 'top combos' as a CSV file,
-    matching the original code's functionality.
+    Let users download the top combos as a streamed CSV file.
     """
     global analysis_top_df
     if analysis_top_df is None:
         return "No analysis run yet", 400
-    output = io.StringIO()
-    analysis_top_df.to_csv(output, index=False)
-    output.seek(0)
-    response = make_response(output.getvalue())
+
+    def generate():
+        yield analysis_top_df.to_csv(index=False).encode('utf-8')
+
+    response = Response(generate(), mimetype='text/csv')
     response.headers["Content-Disposition"] = "attachment; filename=top_combinations.csv"
-    response.headers["Content-type"] = "text/csv"
     return response
 
 @app.route('/download_selected_csv', methods=['GET'])
 def download_selected_csv():
     """
-    Let users download the 'selected combos' (non-overlapping subsets) as CSV,
-    matching the original code's functionality.
+    Let users download the selected combos as a streamed CSV file.
     """
     global analysis_selected_df
     if analysis_selected_df is None:
         return "No analysis run yet", 400
-    output = io.StringIO()
-    analysis_selected_df.to_csv(output, index=False)
-    output.seek(0)
-    response = make_response(output.getvalue())
+
+    def generate():
+        yield analysis_selected_df.to_csv(index=False).encode('utf-8')
+
+    response = Response(generate(), mimetype='text/csv')
     response.headers["Content-Disposition"] = "attachment; filename=selected_combinations.csv"
-    response.headers["Content-type"] = "text/csv"
     return response
 
+def get_draws_chunk(game_type, limit, offset):
+    """
+    Helper function to get a chunk of draws.
+    """
+    conn = get_db_connection(game_type)
+    draws = conn.execute(
+        "SELECT * FROM draws ORDER BY sort_order LIMIT ? OFFSET ?",
+        (limit, offset)
+    ).fetchall()
+    conn.close()
+    return draws
+
 if __name__ == '__main__':
-    # Typically run with "python app.py" or "gunicorn app:app"
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
