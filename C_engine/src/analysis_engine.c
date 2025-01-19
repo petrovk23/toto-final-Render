@@ -8,11 +8,11 @@
 #include "analysis_engine.h"
 
 #define MAX_COMBO_STR 255
-#define MAX_SUBSETS_STR 511
+#define MAX_SUBSETS_STR 65535
 #define MAX_ALLOWED_J 200
 #define MAX_ALLOWED_OUT_LEN 1000000
 #define MAX_NUMBERS 50
-#define HASH_SIZE (1 << 20)  // 1M entries
+#define HASH_SIZE (1 << 24)  // 16M entries
 
 typedef unsigned long long uint64;
 typedef unsigned int uint32;

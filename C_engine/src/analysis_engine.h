@@ -15,7 +15,7 @@ typedef struct {
     char combination[256];
     double avg_rank;
     double min_value;
-    char subsets[512];
+    char subsets[65536];
 
     // For chain analysis:
     //   draw_offset: "Analysis #"

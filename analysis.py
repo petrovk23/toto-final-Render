@@ -57,7 +57,7 @@ class AnalysisResultItem(ctypes.Structure):
         ("combination", ctypes.c_char * 256),
         ("avg_rank", ctypes.c_double),
         ("min_value", ctypes.c_double),
-        ("subsets", ctypes.c_char * 512),
+        ("subsets", ctypes.c_char * 65536),
         ("draw_offset", ctypes.c_int),
         ("draws_until_common", ctypes.c_int),
         ("analysis_start_draw", ctypes.c_int),
