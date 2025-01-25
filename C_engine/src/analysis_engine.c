@@ -250,9 +250,15 @@ static AnalysisResultItem* run_standard_analysis(
                                 for (int i = thread_filled - 1; i > 0; i--) {
                                     int swap;
                                     if (strcmp(m, "avg") == 0) {
-                                        swap = (thread_best[i].avg_rank > thread_best[i - 1].avg_rank);
+                                        // For 'avg': first by avg_rank, then by min_rank
+                                        swap = (thread_best[i].avg_rank > thread_best[i - 1].avg_rank) ||
+                                            (thread_best[i].avg_rank == thread_best[i - 1].avg_rank &&
+                                                thread_best[i].min_rank > thread_best[i - 1].min_rank);
                                     } else {
-                                        swap = (thread_best[i].min_rank > thread_best[i - 1].min_rank);
+                                        // For 'min': first by min_rank, then by avg_rank
+                                        swap = (thread_best[i].min_rank > thread_best[i - 1].min_rank) ||
+                                            (thread_best[i].min_rank == thread_best[i - 1].min_rank &&
+                                                thread_best[i].avg_rank > thread_best[i - 1].avg_rank);
                                     }
                                     if (swap) {
                                         ComboStats tmp = thread_best[i];
@@ -263,21 +269,35 @@ static AnalysisResultItem* run_standard_analysis(
                                     }
                                 }
                             } else {
-                                double val = (strcmp(m, "avg") == 0) ? stats.avg_rank : stats.min_rank;
-                                double worst_val = (strcmp(m, "avg") == 0)
-                                    ? thread_best[l - 1].avg_rank
-                                    : thread_best[l - 1].min_rank;
-                                if (val > worst_val) {
+                                int should_replace = 0;
+                                if (strcmp(m, "avg") == 0) {
+                                    // For 'avg': first by avg_rank, then by min_rank
+                                    should_replace = (stats.avg_rank > thread_best[l - 1].avg_rank) ||
+                                                    (stats.avg_rank == thread_best[l - 1].avg_rank &&
+                                                    stats.min_rank > thread_best[l - 1].min_rank);
+                                } else {
+                                    // For 'min': first by min_rank, then by avg_rank
+                                    should_replace = (stats.min_rank > thread_best[l - 1].min_rank) ||
+                                                    (stats.min_rank == thread_best[l - 1].min_rank &&
+                                                    stats.avg_rank > thread_best[l - 1].avg_rank);
+                                }
+                                if (should_replace) {
                                     thread_best[l - 1] = stats;
                                     // bubble up
                                     for (int i = l - 1; i > 0; i--) {
-                                        double vcur = (strcmp(m, "avg") == 0)
-                                            ? thread_best[i].avg_rank
-                                            : thread_best[i].min_rank;
-                                        double vprev = (strcmp(m, "avg") == 0)
-                                            ? thread_best[i - 1].avg_rank
-                                            : thread_best[i - 1].min_rank;
-                                        if (vcur > vprev) {
+                                        int should_bubble = 0;
+                                        if (strcmp(m, "avg") == 0) {
+                                            // For 'avg': first by avg_rank, then by min_rank
+                                            should_bubble = (thread_best[i].avg_rank > thread_best[i - 1].avg_rank) ||
+                                                        (thread_best[i].avg_rank == thread_best[i - 1].avg_rank &&
+                                                        thread_best[i].min_rank > thread_best[i - 1].min_rank);
+                                        } else {
+                                            // For 'min': first by min_rank, then by avg_rank
+                                            should_bubble = (thread_best[i].min_rank > thread_best[i - 1].min_rank) ||
+                                                        (thread_best[i].min_rank == thread_best[i - 1].min_rank &&
+                                                        thread_best[i].avg_rank > thread_best[i - 1].avg_rank);
+                                        }
+                                        if (should_bubble) {
                                             ComboStats tmp = thread_best[i];
                                             thread_best[i] = thread_best[i - 1];
                                             thread_best[i - 1] = tmp;
@@ -521,9 +541,21 @@ static AnalysisResultItem* run_chain_analysis(
             ComboStats stats;
             evaluate_combo(combo_buf, j, k, use_count, table, &stats);
 
-            double val = (strcmp(m, "avg") == 0) ? stats.avg_rank : stats.min_rank;
-            if (!found_any || val > best_val) {
-                best_val = val;
+            int is_better = 0;
+            if (!found_any) {
+                is_better = 1;
+            } else if (strcmp(m, "avg") == 0) {
+                // For 'avg': first by avg_rank, then by min_rank
+                is_better = (stats.avg_rank > best_stat.avg_rank) ||
+                            (stats.avg_rank == best_stat.avg_rank &&
+                            stats.min_rank > best_stat.min_rank);
+            } else {
+                // For 'min': first by min_rank, then by avg_rank
+                is_better = (stats.min_rank > best_stat.min_rank) ||
+                            (stats.min_rank == best_stat.min_rank &&
+                            stats.avg_rank > best_stat.avg_rank);
+            }
+            if (is_better) {
                 best_stat = stats;
                 found_any = 1;
             }
@@ -792,39 +824,34 @@ static void format_combo(const int* combo, int len, char* out) {
 }
 
 static void format_subsets(const int* combo, int j, int k, int total_draws,
-                           const SubsetTable* table, char* out)
-{
-    int pos = 0;
-    out[pos++] = '[';
+                          const SubsetTable* table, char* out) {
+    typedef struct {
+        int numbers[20];  // Fixed size, more than enough for our k values
+        int rank;
+    } SubsetInfo;
 
-    int idx[20];
+    const int BUFFER_SIZE = 65535;  // Leave 1 byte for null terminator
+
+    int exact_subset_count = (int)nCk_table[j][k];
+
+    SubsetInfo* subsets = (SubsetInfo*)malloc(exact_subset_count * sizeof(SubsetInfo));
+    if (!subsets) {
+        strcpy(out, "[]");
+        return;
+    }
+    int subset_count = 0;
+
+    int idx[20];  // Fixed size, more than enough for our k values
     for (int i = 0; i < k; i++) {
         idx[i] = i;
     }
-    int first = 1;
 
     while (1) {
-        if (!first && pos < (MAX_SUBSETS_STR - 2)) {
-            out[pos++] = ',';
-            out[pos++] = ' ';
-        }
-        first = 0;
-        if (pos >= MAX_SUBSETS_STR - 20) break;
-
-        out[pos++] = '(';
-        out[pos++] = '(';
+        if (subset_count >= exact_subset_count) break;
 
         for (int i = 0; i < k; i++) {
-            if (i > 0) {
-                out[pos++] = ',';
-                out[pos++] = ' ';  // Add space after comma
-            }
-            pos += sprintf(out + pos, "%d", combo[idx[i]]);
-            if (pos >= MAX_SUBSETS_STR - 10) break;
+            subsets[subset_count].numbers[i] = combo[idx[i]];
         }
-        out[pos++] = ')';
-        out[pos++] = ',';
-        out[pos++] = ' ';
 
         uint64 pat = 0ULL;
         for (int i = 0; i < k; i++) {
@@ -834,10 +861,9 @@ static void format_subsets(const int* combo, int j, int k, int total_draws,
         int rank = (last_seen >= 0)
                    ? (total_draws - last_seen - 1)
                    : total_draws;
-        pos += sprintf(out + pos, "%d)", rank);
-        if (pos >= MAX_SUBSETS_STR - 5) break;
+        subsets[subset_count].rank = rank;
+        subset_count++;
 
-        // next k-subset
         int p = k - 1;
         while (p >= 0 && idx[p] == j - k + p) p--;
         if (p < 0) break;
@@ -847,8 +873,56 @@ static void format_subsets(const int* combo, int j, int k, int total_draws,
         }
     }
 
-    if (pos < MAX_SUBSETS_STR) {
+    for (int i = 0; i < subset_count - 1; i++) {
+        for (int j = i + 1; j < subset_count; j++) {
+            if (subsets[j].rank > subsets[i].rank) {
+                SubsetInfo temp = subsets[i];
+                subsets[i] = subsets[j];
+                subsets[j] = temp;
+            }
+        }
+    }
+
+    int remaining_space = BUFFER_SIZE;
+    int pos = 0;
+
+    out[pos++] = '[';
+    remaining_space--;
+
+    for (int i = 0; i < subset_count && remaining_space > 0; i++) {
+        if (i > 0) {
+            if (remaining_space < 2) break;
+            out[pos++] = ',';
+            out[pos++] = ' ';
+            remaining_space -= 2;
+        }
+
+        char subset_buffer[256];
+        int subset_len = snprintf(subset_buffer, sizeof(subset_buffer),
+                                "((%d", subsets[i].numbers[0]);
+        for (int n = 1; n < k; n++) {
+            subset_len += snprintf(subset_buffer + subset_len,
+                                 sizeof(subset_buffer) - subset_len,
+                                 ", %d", subsets[i].numbers[n]);
+        }
+        subset_len += snprintf(subset_buffer + subset_len,
+                             sizeof(subset_buffer) - subset_len,
+                             "), %d)", subsets[i].rank);
+
+        if (subset_len >= remaining_space) break;
+
+        memcpy(out + pos, subset_buffer, subset_len);
+        pos += subset_len;
+        remaining_space -= subset_len;
+    }
+
+    if (remaining_space > 0) {
         out[pos++] = ']';
+    } else {
+        out[BUFFER_SIZE-1] = ']';
+        pos = BUFFER_SIZE;
     }
     out[pos] = '\0';
+
+    free(subsets);
 }

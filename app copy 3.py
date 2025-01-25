@@ -275,19 +275,13 @@ def analysis_run():
     n_val = request.form.get('n', type=int, default=0)
     offset_val = request.form.get('offset_last', type=int, default=0)
 
-    # Reset all analysis state
-    analysis_cancel_requested = True
-    analysis_in_progress = False
-    analysis_thread = None
-    analysis_selected_df = None
-    analysis_top_df = None
-    analysis_elapsed = None
-
-    # Wait a moment to ensure old state is cleared
-    time.sleep(0.1)
-
-    # Reset cancel flag before starting new analysis
-    analysis_cancel_requested = False
+    # If there's an existing analysis, cancel it and wait for its thread to finish.
+    if analysis_in_progress:
+        analysis_cancel_requested = True
+        if analysis_thread and analysis_thread.is_alive():
+            analysis_thread.join()
+        analysis_cancel_requested = False
+        analysis_in_progress = False
 
     analysis_in_progress = True
     analysis_selected_df = None
@@ -296,24 +290,13 @@ def analysis_run():
 
     def worker():
         global analysis_in_progress, analysis_selected_df, analysis_top_df, analysis_elapsed
-        global analysis_cancel_requested
         print("Analysis starting...")
         try:
-            if analysis_cancel_requested:
-                analysis_in_progress = False
-                return
-
             sel_df, top_df, elapsed = run_analysis(
                 game_type=game_type,
                 j=j, k=k, m=m, l=l, n=n_val,
                 last_offset=offset_val
             )
-
-            # For both regular and chain analysis, check cancellation after completion
-            if analysis_cancel_requested:
-                analysis_in_progress = False
-                return
-
             print(f"Analysis completed in {elapsed} seconds")
             analysis_selected_df = sel_df
             analysis_top_df = top_df
@@ -325,15 +308,18 @@ def analysis_run():
             analysis_in_progress = False
             raise
 
-    analysis_thread = threading.Thread(target=worker, daemon=True)
+    analysis_thread = threading.Thread(target=worker)
     analysis_thread.start()
-    return "OK"  # Added return statement
+    return "OK"
 
 @app.route('/analysis_progress', methods=['GET'])
 def analysis_progress():
+    """
+    Simple endpoint to check if analysis is done
+    """
     global analysis_in_progress, analysis_elapsed
     resp = {
-        'in_progress': analysis_in_progress and not analysis_cancel_requested,
+        'in_progress': analysis_in_progress,
         'done': (not analysis_in_progress) and (analysis_elapsed is not None),
         'elapsed': analysis_elapsed
     }
@@ -341,40 +327,15 @@ def analysis_progress():
 
 @app.route('/download_top_csv', methods=['GET'])
 def download_top_csv():
+    """
+    Let users download the 'top combos' as a CSV file,
+    matching the original code's functionality.
+    """
     global analysis_top_df
     if analysis_top_df is None:
         return "No analysis run yet", 400
-
-    # Create a copy to avoid modifying the original DataFrame
-    df_to_save = analysis_top_df.copy()
-
-    # For chain analysis (l=-1), rename columns and drop 'Draw Count'
-    if 'Offset' in df_to_save.columns:  # This indicates it's chain analysis
-        df_to_save = df_to_save.drop('Draw Count', axis=1)
-        df_to_save = df_to_save.rename(columns={
-            'Offset': 'Analysis #',
-            'Average Rank': 'Avg Rank',
-            'MinValue': 'Min Rank',
-            'Draws Until Common Subset': 'Top-Ranked Duration',
-            'Analysis Start Draw': 'For Draw'
-        })
-        # Reorder columns to put 'For Draw' as second column
-        df_to_save = df_to_save.reindex(columns=[
-            'Analysis #',
-            'For Draw',
-            'Combination',
-            'Avg Rank',
-            'Min Rank',
-            'Top-Ranked Duration',
-            'Subsets'
-        ])
-    else:
-        df_to_save = df_to_save.rename(columns={
-            'Average Rank': 'Avg Rank',
-            'MinValue': 'Min Rank'
-        })
     output = io.StringIO()
-    df_to_save.to_csv(output, index=False)
+    analysis_top_df.to_csv(output, index=False)
     output.seek(0)
     response = make_response(output.getvalue())
     response.headers["Content-Disposition"] = "attachment; filename=top_combinations.csv"
@@ -390,19 +351,8 @@ def download_selected_csv():
     global analysis_selected_df
     if analysis_selected_df is None:
         return "No analysis run yet", 400
-
-    # Create a copy to avoid modifying the original DataFrame
-    df_to_save_sel = analysis_selected_df.copy()
-
-    # For chain analysis (l=-1), rename columns and drop 'Draw Count'
-    if 'Offset' not in df_to_save_sel.columns:  # This indicates it's chain analysis
-        df_to_save_sel = df_to_save_sel.rename(columns={
-            'Average Rank': 'Avg Rank',
-            'MinValue': 'Min Rank'
-        })
-
     output = io.StringIO()
-    df_to_save_sel.to_csv(output, index=False)
+    analysis_selected_df.to_csv(output, index=False)
     output.seek(0)
     response = make_response(output.getvalue())
     response.headers["Content-Disposition"] = "attachment; filename=selected_combinations.csv"

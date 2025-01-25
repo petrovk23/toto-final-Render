@@ -146,14 +146,15 @@ document.addEventListener('DOMContentLoaded', function() {
 
         fetch('/analysis_run', {
             method: 'POST',
-            body: createParams(),
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
+            body: createParams()
         })
         .then(resp => {
+            if (!resp.ok) throw new Error('Failed to start analysis');
             if (pollInterval) clearInterval(pollInterval);
             pollInterval = setInterval(checkDone, 1000);
+        })
+        .catch(err => {
+            alert("Failed to start analysis: " + err.message);
         });
     }
 
