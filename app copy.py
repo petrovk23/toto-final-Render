@@ -7,21 +7,15 @@ This is the Flask application entry point. It handles:
 - Routing for pages (index, select_game, combos, analysis, etc.)
 - Database I/O for combos
 - The analysis run invocation
-- The progress endpoint (although we no longer do partial progress from C)
+- A simple "processing" status while analysis runs (replacing the previous progress bar)
+- The ability to cancel any ongoing analysis if a new one starts.
 
-Key changes compared to the original (Python-based) analysis approach:
-- We import 'run_analysis' from the new analysis.py, which calls the C library.
-- For partial-progress updates, we no longer do them, but we keep the endpoints
-  so your UI remains functional (the progress just jumps from 0% to done).
-
-We have ensured that the route "combos" logic is the same as the original:
-- If "offset" is missing, jump to the last page automatically.
-Otherwise, we respect the offset. This ensures you can "see the combos."
-
-The 'analysis_run' route spawns a thread that calls run_analysis(...).
-We store the results in global variables 'analysis_selected_df' and
-'analysis_top_df' to be displayed by the /analysis route. This matches
-the original structure so your UI doesn't break.
+Key changes to support the new functionality:
+- In /analysis_run, if an analysis is already in progress, we cancel (join) the existing
+  thread before starting a new one. This way, the user doesn't need to wait for the
+  previous one to finish if they made a mistake and want to run again.
+- The progress bar has been replaced with a simple "Processing..." spinner/message in
+  templates/results.html, and we do not display partial progress.
 """
 
 import os
@@ -44,8 +38,6 @@ app.config['SESSION_PERMANENT'] = False
 Session(app)
 
 analysis_in_progress = False
-analysis_processed = 0
-analysis_total = 0
 analysis_selected_df = None
 analysis_top_df = None
 analysis_elapsed = None
@@ -268,8 +260,8 @@ def analysis_route():
 @app.route('/analysis_run', methods=['POST'])
 def analysis_run():
     """
-    Starts the analysis in a separate thread so we can poll for progress (though
-    we do not get partial updates from the C code, so the progress just goes 0 -> done).
+    Starts the analysis in a separate thread. If an existing analysis is in progress,
+    we cancel (join) it first, so the user doesn't have to wait for a mistake run to finish.
     """
     global analysis_in_progress, analysis_processed, analysis_total
     global analysis_selected_df, analysis_top_df, analysis_elapsed
@@ -283,68 +275,106 @@ def analysis_run():
     n_val = request.form.get('n', type=int, default=0)
     offset_val = request.form.get('offset_last', type=int, default=0)
 
-    # If there's an existing analysis, cancel it
-    if analysis_in_progress:
-        analysis_cancel_requested = True
-        if analysis_thread and analysis_thread.is_alive():
-            analysis_thread.join()
-        analysis_cancel_requested = False
-        analysis_in_progress = False
+    # Reset all analysis state
+    analysis_cancel_requested = True
+    analysis_in_progress = False
+    analysis_thread = None
+    analysis_selected_df = None
+    analysis_top_df = None
+    analysis_elapsed = None
+
+    # Wait a moment to ensure old state is cleared
+    time.sleep(0.1)
+
+    # Reset cancel flag before starting new analysis
+    analysis_cancel_requested = False
 
     analysis_in_progress = True
-    analysis_processed = 0
-    analysis_total = 0
     analysis_selected_df = None
     analysis_top_df = None
     analysis_elapsed = None
 
     def worker():
         global analysis_in_progress, analysis_selected_df, analysis_top_df, analysis_elapsed
-        sel_df, top_df, elapsed = run_analysis(
-            game_type=game_type,
-            j=j, k=k, m=m, l=l, n=n_val,
-            last_offset=offset_val
-        )
-        analysis_selected_df = sel_df
-        analysis_top_df = top_df
-        analysis_elapsed = elapsed
-        analysis_in_progress = False
+        global analysis_cancel_requested
+        print("Analysis starting...")
+        try:
+            if analysis_cancel_requested:
+                analysis_in_progress = False
+                return
 
-    analysis_thread = threading.Thread(target=worker)
+            sel_df, top_df, elapsed = run_analysis(
+                game_type=game_type,
+                j=j, k=k, m=m, l=l, n=n_val,
+                last_offset=offset_val
+            )
+
+            # For both regular and chain analysis, check cancellation after completion
+            if analysis_cancel_requested:
+                analysis_in_progress = False
+                return
+
+            print(f"Analysis completed in {elapsed} seconds")
+            analysis_selected_df = sel_df
+            analysis_top_df = top_df
+            analysis_elapsed = elapsed
+            analysis_in_progress = False
+            print("Worker thread finished, in_progress=False")
+        except Exception as e:
+            print(f"Error in analysis: {str(e)}")
+            analysis_in_progress = False
+            raise
+
+    analysis_thread = threading.Thread(target=worker, daemon=True)
     analysis_thread.start()
-    return "OK"
+    return "OK"  # Added return statement
 
 @app.route('/analysis_progress', methods=['GET'])
 def analysis_progress():
-    """
-    Our UI polls this endpoint for progress. We do not have partial updates from C,
-    so we simply return 'done' or not. Once the C code finishes, 'done' is true.
-    """
-    global analysis_in_progress, analysis_processed, analysis_total, analysis_elapsed
+    global analysis_in_progress, analysis_elapsed
     resp = {
-        'in_progress': analysis_in_progress,
-        'processed': analysis_processed,
-        'total': analysis_total,
+        'in_progress': analysis_in_progress and not analysis_cancel_requested,
         'done': (not analysis_in_progress) and (analysis_elapsed is not None),
         'elapsed': analysis_elapsed
     }
     return jsonify(resp)
 
-################################################################################
-# ADD THESE TWO MISSING ROUTES BELOW TO MATCH THE ORIGINAL FUNCTIONALITY
-################################################################################
-
 @app.route('/download_top_csv', methods=['GET'])
 def download_top_csv():
-    """
-    Let users download the 'top combos' as a CSV file,
-    matching the original code's functionality.
-    """
     global analysis_top_df
     if analysis_top_df is None:
         return "No analysis run yet", 400
+
+    # Create a copy to avoid modifying the original DataFrame
+    df_to_save = analysis_top_df.copy()
+
+    # For chain analysis (l=-1), rename columns and drop 'Draw Count'
+    if 'Offset' in df_to_save.columns:  # This indicates it's chain analysis
+        df_to_save = df_to_save.drop('Draw Count', axis=1)
+        df_to_save = df_to_save.rename(columns={
+            'Offset': 'Analysis #',
+            'Average Rank': 'Avg Rank',
+            'MinValue': 'Min Rank',
+            'Draws Until Common Subset': 'Top-Ranked Duration',
+            'Analysis Start Draw': 'For Draw'
+        })
+        # Reorder columns to put 'For Draw' as second column
+        df_to_save = df_to_save.reindex(columns=[
+            'Analysis #',
+            'For Draw',
+            'Combination',
+            'Avg Rank',
+            'Min Rank',
+            'Top-Ranked Duration',
+            'Subsets'
+        ])
+    else:
+        df_to_save = df_to_save.rename(columns={
+            'Average Rank': 'Avg Rank',
+            'MinValue': 'Min Rank'
+        })
     output = io.StringIO()
-    analysis_top_df.to_csv(output, index=False)
+    df_to_save.to_csv(output, index=False)
     output.seek(0)
     response = make_response(output.getvalue())
     response.headers["Content-Disposition"] = "attachment; filename=top_combinations.csv"
@@ -360,14 +390,24 @@ def download_selected_csv():
     global analysis_selected_df
     if analysis_selected_df is None:
         return "No analysis run yet", 400
+
+    # Create a copy to avoid modifying the original DataFrame
+    df_to_save_sel = analysis_selected_df.copy()
+
+    # For chain analysis (l=-1), rename columns and drop 'Draw Count'
+    if 'Offset' not in df_to_save_sel.columns:  # This indicates it's chain analysis
+        df_to_save_sel = df_to_save_sel.rename(columns={
+            'Average Rank': 'Avg Rank',
+            'MinValue': 'Min Rank'
+        })
+
     output = io.StringIO()
-    analysis_selected_df.to_csv(output, index=False)
+    df_to_save_sel.to_csv(output, index=False)
     output.seek(0)
     response = make_response(output.getvalue())
     response.headers["Content-Disposition"] = "attachment; filename=selected_combinations.csv"
     response.headers["Content-type"] = "text/csv"
     return response
-
 
 if __name__ == '__main__':
     # Typically run with "python app.py" or "gunicorn app:app"

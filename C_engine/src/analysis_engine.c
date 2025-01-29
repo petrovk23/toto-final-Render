@@ -300,6 +300,7 @@ static AnalysisResultItem* run_standard_analysis(
                                         if (should_bubble) {
                                             ComboStats tmp = thread_best[i];
                                             thread_best[i] = thread_best[i - 1];
+                                            thread_best[i] = thread_best[i - 1];
                                             thread_best[i - 1] = tmp;
                                         } else {
                                             break;
@@ -308,14 +309,19 @@ static AnalysisResultItem* run_standard_analysis(
                                 }
                             }
 
-                            // Next combo
+                            // Next combo - Optimized combo generation
                             int pos = j - 1;
-                            while (pos >= 0 && curr_combo[pos] == max_number - j + pos + 1) pos--;
-                            if (pos < 0 || pos == 0) break;  // Break if done or first number would change
-                            curr_combo[pos]++;
-                            for (int x = pos + 1; x < j; x++) {
-                                curr_combo[x] = curr_combo[pos] + (x - pos);
+                            while (pos >= 0) {
+                                curr_combo[pos]++;
+                                if (curr_combo[pos] <= max_number - (j - 1 - pos)) {
+                                    for (int x = pos + 1; x < j; ++x) {
+                                        curr_combo[x] = curr_combo[x - 1] + 1;
+                                    }
+                                    break;
+                                }
+                                pos--;
                             }
+                            if (pos < 0) break; // No more combinations
                         }
                     }
                 }
@@ -560,14 +566,19 @@ static AnalysisResultItem* run_chain_analysis(
                 found_any = 1;
             }
 
-            // next
+            // next - Optimized combo generation
             int pos = j - 1;
-            while (pos >= 0 && combo_buf[pos] == max_number - j + pos + 1) pos--;
-            if (pos < 0) break;
-            combo_buf[pos]++;
-            for (int x = pos + 1; x < j; x++) {
-                combo_buf[x] = combo_buf[pos] + (x - pos);
+            while (pos >= 0) {
+                combo_buf[pos]++;
+                if (combo_buf[pos] <= max_number - (j - 1 - pos)) {
+                    for (int x = pos + 1; x < j; ++x) {
+                        combo_buf[x] = combo_buf[x - 1] + 1;
+                    }
+                    break;
+                }
+                pos--;
             }
+            if (pos < 0) break;
         }
         free(combo_buf);
         free_subset_table(table);
@@ -672,12 +683,7 @@ static void init_tables() {
 }
 
 static inline int popcount64(uint64 x) {
-    int res = 0;
-    for (int i = 0; i < 8; i++) {
-        res += bit_count_table[x & 0xFF];
-        x >>= 8;
-    }
-    return res;
+    return __builtin_popcountll(x); // Use built-in for speed
 }
 
 static SubsetTable* create_subset_table(int max_entries) {
@@ -707,12 +713,7 @@ static void free_subset_table(SubsetTable* table) {
 }
 
 static inline uint32 hash_subset(uint64 pattern) {
-    // Simple 64->32 hash
-    pattern ^= pattern >> 33;
-    pattern *= 0xff51afd7ed558ccdULL;
-    pattern ^= pattern >> 33;
-    pattern *= 0xc4ceb9fe1a85ec53ULL;
-    pattern ^= pattern >> 33;
+    // Simple 64->32 hash - just use lower 32 bits for speed
     return (uint32)(pattern & (HASH_SIZE - 1));
 }
 
@@ -747,7 +748,7 @@ static inline uint64 numbers_to_pattern(const int* numbers, int count) {
 
 static void process_draw(const int* draw, int draw_idx, int k, SubsetTable* table) {
     if (k > 6) return;
-    int idx[20];
+    int idx[6]; // Optimized index array size
     for (int i = 0; i < k; i++) {
         idx[i] = i;
     }
@@ -758,13 +759,19 @@ static void process_draw(const int* draw, int draw_idx, int k, SubsetTable* tabl
         }
         insert_subset(table, pat, draw_idx);
 
+        // Optimized next combination generation
         int pos = k - 1;
-        while (pos >= 0 && idx[pos] == 6 - k + pos) pos--;
-        if (pos < 0) break;
-        idx[pos]++;
-        for (int x = pos + 1; x < k; x++) {
-            idx[x] = idx[x - 1] + 1;
+        while (pos >= 0) {
+            idx[pos]++;
+            if (idx[pos] <= 6 - (k - 1 - pos)) {
+                for (int x = pos + 1; x < k; ++x) {
+                    idx[x] = idx[x - 1] + 1;
+                }
+                break;
+            }
+            pos--;
         }
+        if (pos < 0) break;
     }
 }
 
@@ -775,7 +782,7 @@ static void evaluate_combo(const int* combo, int j, int k, int total_draws,
     double min_rank = (double)total_draws;
     int count = 0;
 
-    int idx[20];
+    int idx[6]; // Optimized index array size
     for (int i = 0; i < k; i++) {
         idx[i] = i;
     }
@@ -795,13 +802,19 @@ static void evaluate_combo(const int* combo, int j, int k, int total_draws,
         }
         count++;
 
+        // Optimized next combination generation
         int pos = k - 1;
-        while (pos >= 0 && idx[pos] == j - k + pos) pos--;
-        if (pos < 0) break;
-        idx[pos]++;
-        for (int x = pos + 1; x < k; x++) {
-            idx[x] = idx[x - 1] + 1;
+        while (pos >= 0) {
+            idx[pos]++;
+            if (idx[pos] <= j - (k - 1 - pos)) {
+                for (int x = pos + 1; x < k; ++x) {
+                    idx[x] = idx[x - 1] + 1;
+                }
+                break;
+            }
+            pos--;
         }
+        if (pos < 0) break;
     }
 
     stats->pattern = numbers_to_pattern(combo, j);
@@ -826,7 +839,7 @@ static void format_combo(const int* combo, int len, char* out) {
 static void format_subsets(const int* combo, int j, int k, int total_draws,
                           const SubsetTable* table, char* out) {
     typedef struct {
-        int numbers[20];  // Fixed size, more than enough for our k values
+        int numbers[6];  // Optimized index array size
         int rank;
     } SubsetInfo;
 
@@ -841,7 +854,7 @@ static void format_subsets(const int* combo, int j, int k, int total_draws,
     }
     int subset_count = 0;
 
-    int idx[20];  // Fixed size, more than enough for our k values
+    int idx[6];  // Optimized index array size
     for (int i = 0; i < k; i++) {
         idx[i] = i;
     }
@@ -864,13 +877,19 @@ static void format_subsets(const int* combo, int j, int k, int total_draws,
         subsets[subset_count].rank = rank;
         subset_count++;
 
+        // Optimized next combination generation
         int p = k - 1;
-        while (p >= 0 && idx[p] == j - k + p) p--;
-        if (p < 0) break;
-        idx[p]++;
-        for (int x = p + 1; x < k; x++) {
-            idx[x] = idx[x - 1] + 1;
+        while (p >= 0) {
+            idx[p]++;
+            if (idx[p] <= j - (k - 1 - p)) {
+                for (int x = p + 1; x < k; ++x) {
+                    idx[x] = idx[x - 1] + 1;
+                }
+                break;
+            }
+            pos--;
         }
+        if (pos < 0) break;
     }
 
     for (int i = 0; i < subset_count - 1; i++) {

@@ -2685,7 +2685,7 @@ void free_analysis_results(AnalysisResultItem* results);
 
 <goals>
 
-This is my toto project. Make it run at least an order of magnitude faster. Make sure the coherence is retained. Generate only the complete modified files - no other files.
+This is my toto project. Make it run at least an order of magnitude faster. Generate only the files you made changes to, so I could just copy-paste them into my IDE w/o doing anything else.
 
 </goals>
 
