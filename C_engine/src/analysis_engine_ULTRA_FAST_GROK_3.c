@@ -1,8 +1,8 @@
 // Grok 3 w/o thinking generated a large prompt (based on my short one) to a reasoning model which I used for Grok 3 with thinking.
 // Both chats are below
 
-// https://x.com/i/grok?conversation=1896921130729869395
-// https://x.com/i/grok?conversation=1896923958399705255
+// https://x.com/i/grok?conversation=1897647869861007783
+// https://x.com/i/grok?conversation=1897652422643707936
 
 #include <omp.h>
 #include <stdio.h>
@@ -18,7 +18,7 @@
 #define MAX_ALLOWED_J 200
 #define MAX_ALLOWED_OUT_LEN 1000000
 #define MAX_NUMBERS 50
-#define HASH_SIZE (1 << 24)  // 16M entries
+#define HASH_SIZE (1 << 26)  // Increased to 67M entries
 
 typedef unsigned long long uint64;
 typedef unsigned int uint32;
@@ -89,14 +89,14 @@ static AnalysisResultItem* run_chain_analysis(
 );
 
 // ----------------------------------------------------------------------
-// New functions for backtracking
+// Optimized backtracking functions
 // ----------------------------------------------------------------------
-static double compute_avg_rank(int* S, int j, int k, SubsetTable* table, int total_draws);
 static void backtrack(
     int* S,
     int size,
     uint64 current_S,
     double current_min_rank,
+    double sum_current,
     int start_num,
     SubsetTable* table,
     int total_draws,
@@ -106,7 +106,8 @@ static void backtrack(
     ComboStats* thread_best,
     int* thread_filled,
     int l,
-    const char* m
+    const char* m,
+    uint64 Cjk
 );
 
 // ----------------------------------------------------------------------
@@ -162,6 +163,9 @@ static void free_subset_table(SubsetTable* table) {
 }
 
 static inline uint32 hash_subset(uint64 pattern) {
+    // Improved hash function using multiplication for better distribution
+    pattern = (pattern ^ (pattern >> 32)) * 2654435761ULL;
+    pattern = (pattern ^ (pattern >> 32)) * 2654435761ULL;
     return (uint32)(pattern & (HASH_SIZE - 1));
 }
 
@@ -221,49 +225,12 @@ static void process_draw(const int* draw, int draw_idx, int k, SubsetTable* tabl
     }
 }
 
-static double compute_avg_rank(int* S, int j, int k, SubsetTable* table, int total_draws) {
-    double sum_ranks = 0.0;
-    int count = 0;
-    int idx[k];
-    for (int i = 0; i < k; i++) idx[i] = i;
-    while (1) {
-        int subset[k];
-        for (int i = 0; i < k; i++) subset[i] = S[idx[i]];
-        for (int a = 0; a < k - 1; a++) {
-            for (int b = a + 1; b < k; b++) {
-                if (subset[a] > subset[b]) {
-                    int t = subset[a];
-                    subset[a] = subset[b];
-                    subset[b] = t;
-                }
-            }
-        }
-        uint64 pat = numbers_to_pattern(subset, k);
-        int last_seen = lookup_subset(table, pat);
-        double rank = (last_seen >= 0) ? (double)(total_draws - last_seen - 1) : (double)total_draws;
-        sum_ranks += rank;
-        count++;
-        int p = k - 1;
-        while (p >= 0) {
-            if (idx[p] < j - (k - p)) {
-                idx[p]++;
-                for (int x = p + 1; x < k; x++) {
-                    idx[x] = idx[x - 1] + 1;
-                }
-                break;
-            }
-            p--;
-        }
-        if (p < 0) break;
-    }
-    return sum_ranks / (double)count;
-}
-
 static void backtrack(
     int* S,
     int size,
     uint64 current_S,
     double current_min_rank,
+    double sum_current,
     int start_num,
     SubsetTable* table,
     int total_draws,
@@ -273,10 +240,11 @@ static void backtrack(
     ComboStats* thread_best,
     int* thread_filled,
     int l,
-    const char* m
+    const char* m,
+    uint64 Cjk
 ) {
     if (size == j) {
-        double avg_rank = compute_avg_rank(S, j, k, table, total_draws);
+        double avg_rank = sum_current / (double)Cjk;
         double min_rank = current_min_rank;
         int should_insert = 0;
         if (*thread_filled < l) {
@@ -326,6 +294,7 @@ static void backtrack(
             S[size] = num;
             uint64 new_S = current_S | (1ULL << (num - 1));
             double min_of_new = total_draws + 1.0;
+            double sum_of_new = 0.0;
             if (size >= k - 1) {
                 int idx[k - 1];
                 for (int i = 0; i < k - 1; i++) idx[i] = i;
@@ -346,6 +315,7 @@ static void backtrack(
                     int last_seen = lookup_subset(table, pat);
                     double rank = (last_seen >= 0) ? (double)(total_draws - last_seen - 1) : (double)total_draws;
                     if (rank < min_of_new) min_of_new = rank;
+                    sum_of_new += rank;
                     int p = k - 2;
                     while (p >= 0) {
                         if (idx[p] < size - (k - 1 - p)) {
@@ -361,8 +331,27 @@ static void backtrack(
                 }
             }
             double new_min_rank = (current_min_rank < min_of_new) ? current_min_rank : min_of_new;
-            if (*thread_filled < l || new_min_rank >= thread_best[l - 1].min_rank) {
-                backtrack(S, size + 1, new_S, new_min_rank, num + 1, table, total_draws, max_number, j, k, thread_best, thread_filled, l, m);
+            double new_sum_current = sum_current + sum_of_new;
+            uint64 Cs_k = (size + 1 >= k) ? nCk_table[size + 1][k] : 0;
+            double upper_avg = (new_sum_current + (Cjk - Cs_k) * (double)total_draws) / (double)Cjk;
+            int should_continue = 0;
+            if (*thread_filled < l) {
+                should_continue = 1;
+            } else {
+                if (strcmp(m, "avg") == 0) {
+                    if (upper_avg > thread_best[l - 1].avg_rank ||
+                        (upper_avg == thread_best[l - 1].avg_rank && new_min_rank > thread_best[l - 1].min_rank)) {
+                        should_continue = 1;
+                    }
+                } else {
+                    if (new_min_rank > thread_best[l - 1].min_rank ||
+                        (new_min_rank == thread_best[l - 1].min_rank && upper_avg > thread_best[l - 1].avg_rank)) {
+                        should_continue = 1;
+                    }
+                }
+            }
+            if (should_continue) {
+                backtrack(S, size + 1, new_S, new_min_rank, new_sum_current, num + 1, table, total_draws, max_number, j, k, thread_best, thread_filled, l, m, Cjk);
             }
         }
     }
@@ -394,6 +383,7 @@ static AnalysisResultItem* run_standard_analysis(
 
     int filled = 0;
     int error_occurred = 0;
+    uint64 Cjk = nCk_table[j][k];
 
     #pragma omp parallel
     {
@@ -414,7 +404,8 @@ static AnalysisResultItem* run_standard_analysis(
                     S[0] = first;
                     uint64 current_S = (1ULL << (first - 1));
                     double current_min_rank = (double)(use_count + 1);
-                    backtrack(S, 1, current_S, current_min_rank, first + 1, table, use_count, max_number, j, k, thread_best, &thread_filled, l, m);
+                    double sum_current = 0.0;
+                    backtrack(S, 1, current_S, current_min_rank, sum_current, first + 1, table, use_count, max_number, j, k, thread_best, &thread_filled, l, m, Cjk);
                 }
             }
             #pragma omp critical
@@ -460,8 +451,8 @@ static AnalysisResultItem* run_standard_analysis(
                 }
             }
         }
-        if (S) free(S);
-        if (thread_best) free(thread_best);
+        free(S);
+        free(thread_best);
     }
 
     if (error_occurred) {
@@ -533,7 +524,7 @@ static AnalysisResultItem* run_standard_analysis(
     int total_used = results_count + second_table_count;
     *out_len = total_used;
 
-    if (pick_indices) free(pick_indices);
+    free(pick_indices);
     free_subset_table(table);
     free(best_stats);
 
@@ -572,6 +563,7 @@ static AnalysisResultItem* run_chain_analysis(
 
     int chain_index = 0;
     int current_offset = initial_offset;
+    uint64 Cjk = nCk_table[j][k];
 
     while (current_offset >= 0 && current_offset <= draws_count - 1) {
         int use_count = draws_count - current_offset;
@@ -583,12 +575,14 @@ static AnalysisResultItem* run_chain_analysis(
         }
 
         int* S = (int*)malloc(j * sizeof(int));
-        ComboStats best;
+        ComboStats best = {0};
         int filled = 0;
         if (S) {
             S[0] = 1;
             uint64 current_S = (1ULL << (S[0] - 1));
-            backtrack(S, 1, current_S, (double)(use_count + 1), 2, table, use_count, max_number, j, k, &best, &filled, 1, m);
+            double current_min_rank = (double)(use_count + 1);
+            double sum_current = 0.0;
+            backtrack(S, 1, current_S, current_min_rank, sum_current, 2, table, use_count, max_number, j, k, &best, &filled, 1, m, Cjk);
         }
         free(S);
         free_subset_table(table);
