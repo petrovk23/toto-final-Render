@@ -88,9 +88,11 @@ static void backtrack(
     int* thread_filled,
     int l,
     const char* m,
-    uint64 Cjk
+    uint64 Cjk,
+    double* prefix_sum
 );
 
+static int compare_double_desc(const void* a, const void* b);
 static int compare_avg_rank(const void* a, const void* b);
 static int compare_min_rank(const void* a, const void* b);
 
@@ -203,6 +205,323 @@ static void process_draw(const int* draw, int draw_idx, int k, SubsetTable* tabl
     }
 }
 
+static void format_combo(const int* combo, int len, char* out) {
+    int pos = 0;
+    for (int i = 0; i < len; i++) {
+        if (i > 0) {
+            out[pos++] = ',';
+            out[pos++] = ' ';
+        }
+        pos += sprintf(out + pos, "%d", combo[i]);
+    }
+    out[pos] = '\0';
+}
+
+static void format_subsets(const int* combo, int j, int k, int total_draws,
+                           const SubsetTable* table, char* out) {
+    typedef struct {
+        int numbers[6];
+        int rank;
+    } SubsetInfo;
+
+    int exact_subset_count = (int)nCk_table[j][k];
+    SubsetInfo* subsets = (SubsetInfo*)malloc(exact_subset_count * sizeof(SubsetInfo));
+    if (!subsets) {
+        strcpy(out, "[]");
+        return;
+    }
+    int subset_count = 0;
+
+    int idx[6];
+    for (int i = 0; i < k; i++) idx[i] = i;
+    while (1) {
+        for (int i = 0; i < k; i++) {
+            subsets[subset_count].numbers[i] = combo[idx[i]];
+        }
+        uint64 pat = numbers_to_pattern(subsets[subset_count].numbers, k);
+        int last_seen = lookup_subset(table, pat);
+        int rank = (last_seen >= 0) ? (total_draws - last_seen - 1) : total_draws;
+        subsets[subset_count].rank = rank;
+        subset_count++;
+        int p = k - 1;
+        while (p >= 0) {
+            if (idx[p] < j - (k - p)) {
+                idx[p]++;
+                for (int x = p + 1; x < k; x++) {
+                    idx[x] = idx[x - 1] + 1;
+                }
+                break;
+            }
+            p--;
+        }
+        if (p < 0) break;
+    }
+
+    for (int i = 0; i < subset_count - 1; i++) {
+        for (int j = i + 1; j < subset_count; j++) {
+            if (subsets[j].rank > subsets[i].rank) {
+                SubsetInfo temp = subsets[i];
+                subsets[i] = subsets[j];
+                subsets[j] = temp;
+            }
+        }
+    }
+
+    int pos = 0;
+    out[pos++] = '[';
+    for (int i = 0; i < subset_count; i++) {
+        if (i > 0) {
+            out[pos++] = ',';
+            out[pos++] = ' ';
+        }
+        pos += sprintf(out + pos, "((%d", subsets[i].numbers[0]);
+        for (int n = 1; n < k; n++) {
+            pos += sprintf(out + pos, ", %d", subsets[i].numbers[n]);
+        }
+        pos += sprintf(out + pos, "), %d)", subsets[i].rank);
+    }
+    out[pos++] = ']';
+    out[pos] = '\0';
+
+    free(subsets);
+}
+
+static int compare_double_desc(const void* a, const void* b) {
+    double da = *(const double*)a;
+    double db = *(const double*)b;
+    if (da > db) return -1;
+    if (da < db) return 1;
+    return 0;
+}
+
+static int compare_avg_rank(const void* a, const void* b) {
+    ComboStats* ca = (ComboStats*)a;
+    ComboStats* cb = (ComboStats*)b;
+    if (ca->avg_rank > cb->avg_rank) return -1;
+    if (ca->avg_rank < cb->avg_rank) return 1;
+    if (ca->min_rank > cb->min_rank) return -1;
+    if (ca->min_rank < cb->min_rank) return 1;
+    return 0;
+}
+
+static int compare_min_rank(const void* a, const void* b) {
+    ComboStats* ca = (ComboStats*)a;
+    ComboStats* cb = (ComboStats*)b;
+    if (ca->min_rank > cb->min_rank) return -1;
+    if (ca->min_rank < cb->min_rank) return 1;
+    if (ca->avg_rank > cb->avg_rank) return -1;
+    if (ca->avg_rank < cb->avg_rank) return 1;
+    return 0;
+}
+
+static AnalysisResultItem* run_standard_analysis(
+    const int* sorted_draws_data,
+    int use_count,
+    int j,
+    int k,
+    const char* m,
+    int l,
+    int n,
+    int max_number,
+    int* out_len
+) {
+    SubsetTable* table = create_subset_table(HASH_SIZE);
+    if (!table) return NULL;
+    for (int i = 0; i < use_count; i++) {
+        process_draw(&sorted_draws_data[i * 6], i, k, table);
+    }
+
+    uint64 C_max_k = nCk_table[max_number][k];
+    double* all_ranks = (double*)malloc(C_max_k * sizeof(double));
+    if (!all_ranks) {
+        free_subset_table(table);
+        return NULL;
+    }
+
+    int comb[k];
+    for (int i = 0; i < k; i++) comb[i] = i + 1;
+    int idx = 0;
+    while (1) {
+        uint64 pat = numbers_to_pattern(comb, k);
+        int last_seen = lookup_subset(table, pat);
+        double rank = (last_seen >= 0) ? (double)(use_count - last_seen - 1) : (double)use_count;
+        all_ranks[idx++] = rank;
+        int p = k - 1;
+        while (p >= 0 && comb[p] == max_number - k + p + 1) p--;
+        if (p < 0) break;
+        comb[p]++;
+        for (int x = p + 1; x < k; x++) {
+            comb[x] = comb[p] + (x - p);
+        }
+    }
+
+    qsort(all_ranks, C_max_k, sizeof(double), compare_double_desc);
+    double* prefix_sum = (double*)malloc((C_max_k + 1) * sizeof(double));
+    if (!prefix_sum) {
+        free(all_ranks);
+        free_subset_table(table);
+        return NULL;
+    }
+    prefix_sum[0] = 0.0;
+    for (uint64 i = 0; i < C_max_k; i++) {
+        prefix_sum[i + 1] = prefix_sum[i] + all_ranks[i];
+    }
+
+    int num_threads = omp_get_max_threads();
+    ComboStats* all_best = (ComboStats*)malloc(num_threads * l * sizeof(ComboStats));
+    if (!all_best) {
+        free(prefix_sum);
+        free(all_ranks);
+        free_subset_table(table);
+        return NULL;
+    }
+    memset(all_best, 0, num_threads * l * sizeof(ComboStats));
+
+    int error_occurred = 0;
+    uint64 Cjk = nCk_table[j][k];
+
+    #pragma omp parallel
+    {
+        int thread_id = omp_get_thread_num();
+        int* S = (int*)malloc(j * sizeof(int));
+        ComboStats* thread_best = &all_best[thread_id * l];
+        int thread_filled = 0;
+        if (!S) {
+            #pragma omp atomic write
+            error_occurred = 1;
+        } else {
+            for (int i = 0; i < l; i++) {
+                thread_best[i].avg_rank = -1.0;
+                thread_best[i].min_rank = -1.0;
+            }
+            #pragma omp for schedule(dynamic)
+            for (int first = 1; first <= max_number - j + 1; first++) {
+                if (!error_occurred) {
+                    S[0] = first;
+                    uint64 current_S = (1ULL << (first - 1));
+                    double current_min_rank = (double)(use_count + 1);
+                    double sum_current = 0.0;
+                    backtrack(S, 1, current_S, current_min_rank, sum_current, first + 1, table, use_count, max_number, j, k, thread_best, &thread_filled, l, m, Cjk, prefix_sum);
+                }
+            }
+            free(S);
+        }
+    }
+
+    if (error_occurred) {
+        free(all_best);
+        free(prefix_sum);
+        free(all_ranks);
+        free_subset_table(table);
+        return NULL;
+    }
+
+    int total_candidates = 0;
+    for (int t = 0; t < num_threads; t++) {
+        for (int i = 0; i < l; i++) {
+            if (all_best[t * l + i].len > 0) total_candidates++;
+        }
+    }
+    ComboStats* candidates = (ComboStats*)malloc(total_candidates * sizeof(ComboStats));
+    idx = 0;
+    for (int t = 0; t < num_threads; t++) {
+        for (int i = 0; i < l; i++) {
+            if (all_best[t * l + i].len > 0) {
+                candidates[idx++] = all_best[t * l + i];
+            }
+        }
+    }
+
+    if (strcmp(m, "avg") == 0) {
+        qsort(candidates, total_candidates, sizeof(ComboStats), compare_avg_rank);
+    } else {
+        qsort(candidates, total_candidates, sizeof(ComboStats), compare_min_rank);
+    }
+
+    int top_count = (total_candidates < l) ? total_candidates : l;
+    ComboStats* best_stats = (ComboStats*)malloc(top_count * sizeof(ComboStats));
+    for (int i = 0; i < top_count; i++) {
+        best_stats[i] = candidates[i];
+    }
+    free(candidates);
+    free(all_best);
+
+    AnalysisResultItem* results = (AnalysisResultItem*)calloc(l + n, sizeof(AnalysisResultItem));
+    if (!results) {
+        free(best_stats);
+        free(prefix_sum);
+        free(all_ranks);
+        free_subset_table(table);
+        return NULL;
+    }
+
+    int results_count = 0;
+    free_subset_table(table);
+    table = create_subset_table(HASH_SIZE);
+    for (int i = 0; i < use_count; i++) {
+        process_draw(&sorted_draws_data[i * 6], i, k, table);
+    }
+
+    for (int i = 0; i < top_count; i++) {
+        format_combo(best_stats[i].combo, best_stats[i].len, results[results_count].combination);
+        format_subsets(best_stats[i].combo, j, k, use_count, table, results[results_count].subsets);
+        results[results_count].avg_rank = best_stats[i].avg_rank;
+        results[results_count].min_value = best_stats[i].min_rank;
+        results[results_count].is_chain_result = 0;
+        results_count++;
+    }
+
+    int second_table_count = 0;
+    int* pick_indices = NULL;
+    if (n > 0 && top_count > 0) {
+        pick_indices = (int*)malloc(top_count * sizeof(int));
+        memset(pick_indices, -1, top_count * sizeof(int));
+        int chosen = 0;
+        pick_indices[chosen++] = 0;
+        for (int i = 1; i < top_count && chosen < n; i++) {
+            uint64 pat_i = best_stats[i].pattern;
+            int overlap = 0;
+            for (int c = 0; c < chosen; c++) {
+                int idxC = pick_indices[c];
+                uint64 pat_c = best_stats[idxC].pattern;
+                uint64 inter = (pat_i & pat_c);
+                if (popcount64(inter) >= k) {
+                    overlap = 1;
+                    break;
+                }
+            }
+            if (!overlap) {
+                pick_indices[chosen++] = i;
+            }
+        }
+        second_table_count = chosen;
+    }
+
+    int bottom_start = results_count;
+    for (int i = 0; i < second_table_count; i++) {
+        int idx = pick_indices[i];
+        format_combo(best_stats[idx].combo, best_stats[idx].len, results[bottom_start + i].combination);
+        format_subsets(best_stats[idx].combo, j, k, use_count, table, results[bottom_start + i].subsets);
+        results[bottom_start + i].avg_rank = best_stats[idx].avg_rank;
+        results[bottom_start + i].min_value = best_stats[idx].min_rank;
+        results[bottom_start + i].is_chain_result = 0;
+    }
+    int total_used = results_count + second_table_count;
+    *out_len = total_used;
+
+    free(pick_indices);
+    free_subset_table(table);
+    free(best_stats);
+    free(prefix_sum);
+    free(all_ranks);
+
+    if (total_used == 0) {
+        free(results);
+        return NULL;
+    }
+    return results;
+}
+
 static void backtrack(
     int* S,
     int size,
@@ -219,7 +538,8 @@ static void backtrack(
     int* thread_filled,
     int l,
     const char* m,
-    uint64 Cjk
+    uint64 Cjk,
+    double* prefix_sum
 ) {
     if (size == j) {
         double avg_rank = sum_current / (double)Cjk;
@@ -302,7 +622,9 @@ static void backtrack(
             double new_min_rank = (current_min_rank < min_of_new) ? current_min_rank : min_of_new;
             double new_sum_current = sum_current + sum_of_new;
             uint64 Cs_k = (size + 1 >= k) ? nCk_table[size + 1][k] : 0;
-            double upper_avg = (new_sum_current + (Cjk - Cs_k) * (double)total_draws) / (double)Cjk;
+            uint64 remaining_subsets = Cjk - Cs_k;
+            double upper_sum_remaining = (remaining_subsets > 0) ? prefix_sum[remaining_subsets] : 0.0;
+            double upper_avg = (new_sum_current + upper_sum_remaining) / (double)Cjk;
             int should_continue = 0;
             if (*thread_filled < l) {
                 should_continue = 1;
@@ -320,195 +642,10 @@ static void backtrack(
                 }
             }
             if (should_continue) {
-                backtrack(S, size + 1, new_S, new_min_rank, new_sum_current, num + 1, table, total_draws, max_number, j, k, thread_best, thread_filled, l, m, Cjk);
+                backtrack(S, size + 1, new_S, new_min_rank, new_sum_current, num + 1, table, total_draws, max_number, j, k, thread_best, thread_filled, l, m, Cjk, prefix_sum);
             }
         }
     }
-}
-
-static int compare_avg_rank(const void* a, const void* b) {
-    ComboStats* ca = (ComboStats*)a;
-    ComboStats* cb = (ComboStats*)b;
-    if (ca->avg_rank > cb->avg_rank) return -1;
-    if (ca->avg_rank < cb->avg_rank) return 1;
-    if (ca->min_rank > cb->min_rank) return -1;
-    if (ca->min_rank < cb->min_rank) return 1;
-    return 0;
-}
-
-static int compare_min_rank(const void* a, const void* b) {
-    ComboStats* ca = (ComboStats*)a;
-    ComboStats* cb = (ComboStats*)b;
-    if (ca->min_rank > cb->min_rank) return -1;
-    if (ca->min_rank < cb->min_rank) return 1;
-    if (ca->avg_rank > cb->avg_rank) return -1;
-    if (ca->avg_rank < cb->avg_rank) return 1;
-    return 0;
-}
-
-static AnalysisResultItem* run_standard_analysis(
-    const int* sorted_draws_data,
-    int use_count,
-    int j,
-    int k,
-    const char* m,
-    int l,
-    int n,
-    int max_number,
-    int* out_len
-) {
-    SubsetTable* table = create_subset_table(HASH_SIZE);
-    if (!table) return NULL;
-    for (int i = 0; i < use_count; i++) {
-        process_draw(&sorted_draws_data[i * 6], i, k, table);
-    }
-
-    int num_threads = omp_get_max_threads();
-    ComboStats* all_best = (ComboStats*)malloc(num_threads * l * sizeof(ComboStats));
-    if (!all_best) {
-        free_subset_table(table);
-        return NULL;
-    }
-    memset(all_best, 0, num_threads * l * sizeof(ComboStats));
-
-    int error_occurred = 0;
-    uint64 Cjk = nCk_table[j][k];
-
-    #pragma omp parallel
-    {
-        int thread_id = omp_get_thread_num();
-        int* S = (int*)malloc(j * sizeof(int));
-        ComboStats* thread_best = &all_best[thread_id * l];
-        int thread_filled = 0;
-        if (!S) {
-            #pragma omp atomic write
-            error_occurred = 1;
-        } else {
-            for (int i = 0; i < l; i++) {
-                thread_best[i].avg_rank = -1.0;
-                thread_best[i].min_rank = -1.0;
-            }
-            #pragma omp for schedule(dynamic)
-            for (int first = 1; first <= max_number - j + 1; first++) {
-                if (!error_occurred) {
-                    S[0] = first;
-                    uint64 current_S = (1ULL << (first - 1));
-                    double current_min_rank = (double)(use_count + 1);
-                    double sum_current = 0.0;
-                    backtrack(S, 1, current_S, current_min_rank, sum_current, first + 1, table, use_count, max_number, j, k, thread_best, &thread_filled, l, m, Cjk);
-                }
-            }
-            free(S);
-        }
-    }
-
-    if (error_occurred) {
-        free(all_best);
-        free_subset_table(table);
-        return NULL;
-    }
-
-    int total_candidates = 0;
-    for (int t = 0; t < num_threads; t++) {
-        for (int i = 0; i < l; i++) {
-            if (all_best[t * l + i].len > 0) total_candidates++;
-        }
-    }
-    ComboStats* candidates = (ComboStats*)malloc(total_candidates * sizeof(ComboStats));
-    int idx = 0;
-    for (int t = 0; t < num_threads; t++) {
-        for (int i = 0; i < l; i++) {
-            if (all_best[t * l + i].len > 0) {
-                candidates[idx++] = all_best[t * l + i];
-            }
-        }
-    }
-
-    if (strcmp(m, "avg") == 0) {
-        qsort(candidates, total_candidates, sizeof(ComboStats), compare_avg_rank);
-    } else {
-        qsort(candidates, total_candidates, sizeof(ComboStats), compare_min_rank);
-    }
-
-    int top_count = (total_candidates < l) ? total_candidates : l;
-    ComboStats* best_stats = (ComboStats*)malloc(top_count * sizeof(ComboStats));
-    for (int i = 0; i < top_count; i++) {
-        best_stats[i] = candidates[i];
-    }
-    free(candidates);
-    free(all_best);
-
-    AnalysisResultItem* results = (AnalysisResultItem*)calloc(l + n, sizeof(AnalysisResultItem));
-    if (!results) {
-        free(best_stats);
-        free_subset_table(table);
-        return NULL;
-    }
-
-    int results_count = 0;
-
-    free_subset_table(table);
-    table = create_subset_table(HASH_SIZE);
-    for (int i = 0; i < use_count; i++) {
-        process_draw(&sorted_draws_data[i * 6], i, k, table);
-    }
-
-    for (int i = 0; i < top_count; i++) {
-        format_combo(best_stats[i].combo, best_stats[i].len, results[results_count].combination);
-        format_subsets(best_stats[i].combo, j, k, use_count, table, results[results_count].subsets);
-        results[results_count].avg_rank = best_stats[i].avg_rank;
-        results[results_count].min_value = best_stats[i].min_rank;
-        results[results_count].is_chain_result = 0;
-        results_count++;
-    }
-
-    int second_table_count = 0;
-    int* pick_indices = NULL;
-    if (n > 0 && top_count > 0) {
-        pick_indices = (int*)malloc(top_count * sizeof(int));
-        memset(pick_indices, -1, top_count * sizeof(int));
-        int chosen = 0;
-        pick_indices[chosen++] = 0;
-        for (int i = 1; i < top_count && chosen < n; i++) {
-            uint64 pat_i = best_stats[i].pattern;
-            int overlap = 0;
-            for (int c = 0; c < chosen; c++) {
-                int idxC = pick_indices[c];
-                uint64 pat_c = best_stats[idxC].pattern;
-                uint64 inter = (pat_i & pat_c);
-                if (popcount64(inter) >= k) {
-                    overlap = 1;
-                    break;
-                }
-            }
-            if (!overlap) {
-                pick_indices[chosen++] = i;
-            }
-        }
-        second_table_count = chosen;
-    }
-
-    int bottom_start = results_count;
-    for (int i = 0; i < second_table_count; i++) {
-        int idx = pick_indices[i];
-        format_combo(best_stats[idx].combo, best_stats[idx].len, results[bottom_start + i].combination);
-        format_subsets(best_stats[idx].combo, j, k, use_count, table, results[bottom_start + i].subsets);
-        results[bottom_start + i].avg_rank = best_stats[idx].avg_rank;
-        results[bottom_start + i].min_value = best_stats[idx].min_rank;
-        results[bottom_start + i].is_chain_result = 0;
-    }
-    int total_used = results_count + second_table_count;
-    *out_len = total_used;
-
-    free(pick_indices);
-    free_subset_table(table);
-    free(best_stats);
-
-    if (total_used == 0) {
-        free(results);
-        return NULL;
-    }
-    return results;
 }
 
 static AnalysisResultItem* run_chain_analysis(
@@ -550,6 +687,48 @@ static AnalysisResultItem* run_chain_analysis(
             process_draw(&sorted_draws_data[i * 6], i, k, table);
         }
 
+        uint64 C_max_k = nCk_table[max_number][k];
+        double* all_ranks = (double*)malloc(C_max_k * sizeof(double));
+        if (!all_ranks) {
+            free_subset_table(table);
+            free(draw_patterns);
+            free(chain_results);
+            *out_len = 0;
+            return NULL;
+        }
+
+        int comb[k];
+        for (int i = 0; i < k; i++) comb[i] = i + 1;
+        int idx = 0;
+        while (1) {
+            uint64 pat = numbers_to_pattern(comb, k);
+            int last_seen = lookup_subset(table, pat);
+            double rank = (last_seen >= 0) ? (double)(use_count - last_seen - 1) : (double)use_count;
+            all_ranks[idx++] = rank;
+            int p = k - 1;
+            while (p >= 0 && comb[p] == max_number - k + p + 1) p--;
+            if (p < 0) break;
+            comb[p]++;
+            for (int x = p + 1; x < k; x++) {
+                comb[x] = comb[p] + (x - p);
+            }
+        }
+
+        qsort(all_ranks, C_max_k, sizeof(double), compare_double_desc);
+        double* prefix_sum = (double*)malloc((C_max_k + 1) * sizeof(double));
+        if (!prefix_sum) {
+            free(all_ranks);
+            free_subset_table(table);
+            free(draw_patterns);
+            free(chain_results);
+            *out_len = 0;
+            return NULL;
+        }
+        prefix_sum[0] = 0.0;
+        for (uint64 i = 0; i < C_max_k; i++) {
+            prefix_sum[i + 1] = prefix_sum[i] + all_ranks[i];
+        }
+
         int* S = (int*)malloc(j * sizeof(int));
         ComboStats best = {0};
         int filled = 0;
@@ -558,10 +737,12 @@ static AnalysisResultItem* run_chain_analysis(
             uint64 current_S = (1ULL << (S[0] - 1));
             double current_min_rank = (double)(use_count + 1);
             double sum_current = 0.0;
-            backtrack(S, 1, current_S, current_min_rank, sum_current, 2, table, use_count, max_number, j, k, &best, &filled, 1, m, Cjk);
+            backtrack(S, 1, current_S, current_min_rank, sum_current, 2, table, use_count, max_number, j, k, &best, &filled, 1, m, Cjk, prefix_sum);
         }
         free(S);
         free_subset_table(table);
+        free(prefix_sum);
+        free(all_ranks);
 
         if (filled == 0) break;
 
@@ -646,96 +827,14 @@ AnalysisResultItem* run_analysis_c(
         }
     }
 
-    AnalysisResultItem* ret = (l != -1) ?
+    AnalysisResultItem* results = (l != -1) ?
         run_standard_analysis(sorted_draws_data, draws_count - last_offset, j, k, m, l, n, max_number, out_len) :
         run_chain_analysis(sorted_draws_data, draws_count, last_offset, j, k, m, max_number, out_len);
 
     free(sorted_draws_data);
-    return ret;
+    return results;
 }
 
 void free_analysis_results(AnalysisResultItem* results) {
     if (results) free(results);
-}
-
-static void format_combo(const int* combo, int len, char* out) {
-    int pos = 0;
-    for (int i = 0; i < len; i++) {
-        if (i > 0) {
-            out[pos++] = ',';
-            out[pos++] = ' ';
-        }
-        pos += sprintf(out + pos, "%d", combo[i]);
-    }
-    out[pos] = '\0';
-}
-
-static void format_subsets(const int* combo, int j, int k, int total_draws,
-                          const SubsetTable* table, char* out) {
-    typedef struct {
-        int numbers[6];
-        int rank;
-    } SubsetInfo;
-
-    int exact_subset_count = (int)nCk_table[j][k];
-    SubsetInfo* subsets = (SubsetInfo*)malloc(exact_subset_count * sizeof(SubsetInfo));
-    if (!subsets) {
-        strcpy(out, "[]");
-        return;
-    }
-    int subset_count = 0;
-
-    int idx[6];
-    for (int i = 0; i < k; i++) idx[i] = i;
-    while (1) {
-        if (subset_count >= exact_subset_count) break;
-        for (int i = 0; i < k; i++) {
-            subsets[subset_count].numbers[i] = combo[idx[i]];
-        }
-        uint64 pat = numbers_to_pattern(subsets[subset_count].numbers, k);
-        int last_seen = lookup_subset(table, pat);
-        int rank = (last_seen >= 0) ? (total_draws - last_seen - 1) : total_draws;
-        subsets[subset_count].rank = rank;
-        subset_count++;
-        int p = k - 1;
-        while (p >= 0) {
-            idx[p]++;
-            if (idx[p] <= j - (k - p)) {
-                for (int x = p + 1; x < k; x++) {
-                    idx[x] = idx[x - 1] + 1;
-                }
-                break;
-            }
-            p--;
-        }
-        if (p < 0) break;
-    }
-
-    for (int i = 0; i < subset_count - 1; i++) {
-        for (int j = i + 1; j < subset_count; j++) {
-            if (subsets[j].rank > subsets[i].rank) {
-                SubsetInfo temp = subsets[i];
-                subsets[i] = subsets[j];
-                subsets[j] = temp;
-            }
-        }
-    }
-
-    int pos = 0;
-    out[pos++] = '[';
-    for (int i = 0; i < subset_count; i++) {
-        if (i > 0) {
-            out[pos++] = ',';
-            out[pos++] = ' ';
-        }
-        pos += sprintf(out + pos, "((%d", subsets[i].numbers[0]);
-        for (int n = 1; n < k; n++) {
-            pos += sprintf(out + pos, ", %d", subsets[i].numbers[n]);
-        }
-        pos += sprintf(out + pos, "), %d)", subsets[i].rank);
-    }
-    out[pos++] = ']';
-    out[pos] = '\0';
-
-    free(subsets);
 }
